@@ -1,0 +1,36 @@
+[project]
+name = "wxextract"
+version = "0.1.0"
+description = "Extract WeChat 4.x conversations on Linux into compact LLM-ready text"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "pycryptodome>=3.20",
+    "zstandard>=0.22",
+    "tiktoken>=0.8",
+    "rich>=13.7",
+    "lxml>=5.2",
+]
+
+[project.scripts]
+wxextract = "wxextract.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/wxextract"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+]
+
+[tool.uv]
+package = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
