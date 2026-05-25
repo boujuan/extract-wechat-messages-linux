@@ -17,6 +17,6 @@ def test_main_pid_consistency():
 
 
 def test_close_returns_true_when_nothing_to_close(monkeypatch):
-    monkeypatch.setattr(lifecycle, "main_wechat_pid", lambda: None)
+    monkeypatch.setattr(lifecycle, "main_wechat_pid", lambda binary=None: None)
     monkeypatch.setattr(lifecycle, "wechat_running", lambda: [])
     assert lifecycle.close_wechat(timeout=0.1) is True

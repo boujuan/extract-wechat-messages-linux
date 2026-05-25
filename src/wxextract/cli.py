@@ -26,6 +26,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--version", action="version", version=f"wxextract {__version__}")
     p.add_argument("--workspace", type=str, default=None, metavar="PATH",
                    help="working directory for snapshot/plain_dbs/output (default: <project>/workspace/)")
+    p.add_argument("--account-dir", type=str, default=None, metavar="PATH",
+                   help="WeChat account folder (xwechat_files/wxid_<id>_<suffix>/). "
+                        "Use when multiple accounts are logged in and auto-pick guesses wrong.")
     p.add_argument("-v", "--verbose", action="store_true", default=True)
     p.add_argument("-q", "--quiet", action="store_true")
 
@@ -37,6 +40,11 @@ def build_parser() -> argparse.ArgumentParser:
                     help="re-extract keys and re-decrypt even if cached versions look fresh")
     rs.add_argument("--no-relaunch", action="store_true",
                     help="don't re-launch WeChat after snapshot (avoids the login-confirm dialog)")
+
+    pv = sub.add_parser("preview", help="peek at the most-recent N messages of a contact, no files written")
+    pv.add_argument("--alias", required=True, help="WeChat ID of the contact")
+    pv.add_argument("--tail", type=int, default=20, help="how many recent messages to show (default: 20)")
+    pv.add_argument("--my-label", default="Me")
 
     for name, help_ in [
         ("run", "full pipeline (default if no subcommand)"),
@@ -58,6 +66,14 @@ def build_parser() -> argparse.ArgumentParser:
                         help="collapse [Tag][Tag][Tag] → [Tag×3] for runs of ≥3")
         sp.add_argument("--redact", action="store_true",
                         help="replace emails / phones / IBANs / long digit runs with placeholders")
+        sp.add_argument("--sticker-emojis", action="store_true",
+                        help="replace [Chuckle]/[Facepalm]/etc with Unicode emoji equivalents")
+        sp.add_argument("--time-precision", choices=("seconds", "minutes"), default="seconds",
+                        help="timestamp precision in compact TXT (default: seconds)")
+        sp.add_argument("--reply-preview", choices=("full", "short", "none"), default="full",
+                        help="quoted-reply rendering: full=sender+time+content, short=sender+time, none=sender only")
+        sp.add_argument("--out-dir", type=str, default=None, metavar="PATH",
+                        help="override the output directory (default: <workspace>/output)")
         if name == "run":
             sp.add_argument("--force", action="store_true",
                             help="re-extract keys and re-decrypt even if cached versions look fresh")
@@ -68,7 +84,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 _RUN_FLAGS = {
     "--alias", "--format", "--chunk", "--gap", "--no-turn-merge", "--my-label",
-    "--skip-recalls", "--include-recalls", "--squash-emoji", "--redact", "--force",
+    "--skip-recalls", "--include-recalls", "--squash-emoji", "--redact",
+    "--sticker-emojis", "--time-precision", "--reply-preview",
+    "--out-dir", "--force", "--no-relaunch",
 }
 
 
@@ -76,20 +94,21 @@ def _inject_default_subcommand(argv: list[str]) -> list[str]:
     """If user types `wxextract --alias X ...` with no subcommand, treat it as `run`.
 
     Detect by scanning until we hit either a known subcommand or a `--`-flag
-    that belongs to `run`/`render`. Top-level flags (`--workspace`, `-v`, `-q`)
-    are passed through unchanged.
+    that belongs to `run`/`render`. Top-level flags (`--workspace`, `--account-dir`,
+    `-v`, `-q`) are passed through unchanged.
     """
-    top_level = {"--workspace", "-v", "--verbose", "-q", "--quiet"}
-    subs = {"status", "list", "resnap", "run", "render"}
+    top_level = {"--workspace", "--account-dir", "-v", "--verbose", "-q", "--quiet"}
+    top_level_takes_arg = {"--workspace", "--account-dir"}
+    subs = {"status", "list", "resnap", "run", "render", "preview"}
     i = 0
     while i < len(argv):
         a = argv[i]
         if a in subs:
             return argv                   # already has subcommand
         if a in top_level:
-            i += 2 if a == "--workspace" else 1
+            i += 2 if a in top_level_takes_arg else 1
             continue
-        if a.startswith("--workspace="):
+        if a.startswith("--workspace=") or a.startswith("--account-dir="):
             i += 1
             continue
         if a.startswith("-"):
@@ -120,9 +139,12 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_list(workspace)
     if cmd == "resnap":
         return _cmd_resnap(workspace, force=getattr(args, "force", False),
-                           no_relaunch=getattr(args, "no_relaunch", False))
+                           no_relaunch=getattr(args, "no_relaunch", False),
+                           account_dir=_account_dir_arg(args))
     if cmd == "render":
         return _cmd_render(args, workspace, log)
+    if cmd == "preview":
+        return _cmd_preview(args, workspace, log)
     if cmd == "run":
         return _cmd_run(args, workspace, log)
     parser.print_help()
@@ -140,8 +162,10 @@ def _cmd_status(workspace: Path) -> int:
     print(f"workspace        : {workspace}")
     try:
         d = discover.discover()
+        print(f"install kind     : {d.install_kind}")
         print(f"install version  : {d.install_version or '<not via pacman>'}")
         print(f"binary           : {d.binary_path or '<not found>'}")
+        print(f"launch cmd       : {' '.join(d.launch_cmd) or '<none>'}")
         print(f"data root        : {d.data_root}")
         print(f"account          : {d.account_dir.name}")
         print(f"my wxid          : {d.my_wxid}")
@@ -259,12 +283,14 @@ def _cached_keys_still_valid(keys_path: Path, db_storage: Path) -> dict[str, str
     return saved
 
 
-def _cmd_resnap(workspace: Path, force: bool = False, no_relaunch: bool = False) -> int:
+def _cmd_resnap(workspace: Path, force: bool = False, no_relaunch: bool = False,
+                account_dir: Path | None = None) -> int:
     from wxextract import discover, lifecycle, snapshot
     from wxextract.decrypt import decrypt_all
     from wxextract.keys import collect_dbs, load_keys, save_keys, scan
     log = setup_logging(verbose=True)
-    d = discover.discover()
+    d = discover.discover(prefer_account=account_dir)
+    log.info(f"install kind: {d.install_kind}; binary: {d.binary_path}; launch: {' '.join(d.launch_cmd) or '<none>'}")
     keys_path = workspace / "all_keys.json"
 
     # ── SNAPSHOT-FRESHNESS FAST PATH ──────────────────────────────────────────
@@ -288,15 +314,36 @@ def _cmd_resnap(workspace: Path, force: bool = False, no_relaunch: bool = False)
         # need WeChat running to scan memory
         if not lifecycle.wechat_running():
             log.info("wechat not running — launching for key extraction")
-            lifecycle.launch_wechat()
+            lifecycle.launch_wechat(cmd=d.launch_cmd or None)
             time.sleep(8)
         pids = []
-        mp = lifecycle.main_wechat_pid()
+        bin_str = str(d.binary_path) if d.binary_path else None
+        mp = lifecycle.main_wechat_pid(binary=bin_str)
         if mp:
             pids.append(mp)
         pids += [p for p in lifecycle.wechat_running() if p != mp]
         scan_res = scan(pids, d.db_storage())
         log.info(f"keys: {len(scan_res.keys_by_rel)} / {len(scan_res.salt_to_rels)} via memory scan in {scan_res.elapsed:.2f}s")
+        # 0/N is almost always "WeChat is at the Open WeChat dialog" → offer to wait + retry
+        if len(scan_res.keys_by_rel) == 0 and len(scan_res.salt_to_rels) > 0 and sys.stdin.isatty():
+            log.warning("0 keys recovered — WeChat is likely at the 'Open WeChat' login-confirm dialog.")
+            log.warning("If you click that green 'Open WeChat' button now, the keys will load into memory.")
+            for attempt in range(1, 4):
+                try:
+                    input(f"Press Enter to retry (attempt {attempt}/3), or Ctrl+C to abort: ")
+                except (EOFError, KeyboardInterrupt):
+                    print()
+                    return 3
+                time.sleep(1.5)
+                pids = []
+                mp = lifecycle.main_wechat_pid(binary=bin_str)
+                if mp:
+                    pids.append(mp)
+                pids += [p for p in lifecycle.wechat_running() if p != mp]
+                scan_res = scan(pids, d.db_storage())
+                log.info(f"retry {attempt}: keys {len(scan_res.keys_by_rel)} / {len(scan_res.salt_to_rels)}")
+                if len(scan_res.keys_by_rel) == len(scan_res.salt_to_rels):
+                    break
         if len(scan_res.keys_by_rel) < len(scan_res.salt_to_rels):
             log.error(
                 f"could not recover all keys ({len(scan_res.keys_by_rel)}/{len(scan_res.salt_to_rels)})"
@@ -312,7 +359,8 @@ def _cmd_resnap(workspace: Path, force: bool = False, no_relaunch: bool = False)
     # ── CLOSE → SNAPSHOT → DECRYPT ────────────────────────────────────────────
     was_running = bool(lifecycle.wechat_running())
     if was_running:
-        if not lifecycle.close_wechat():
+        bin_str = str(d.binary_path) if d.binary_path else None
+        if not lifecycle.close_wechat(binary=bin_str):
             log.warning("wechat did not close cleanly within 10s; continuing anyway")
     snap_acct = snapshot.snapshot(d.account_dir, workspace / "snapshot")
     decrypt_results = decrypt_all(
@@ -330,7 +378,7 @@ def _cmd_resnap(workspace: Path, force: bool = False, no_relaunch: bool = False)
             if not r.ok:
                 log.error(f"  failed: {r.rel}: {r.error}")
     if was_running and not no_relaunch:
-        lifecycle.launch_wechat()
+        lifecycle.launch_wechat(cmd=d.launch_cmd or None)
         log.info("(WeChat may show a login confirmation dialog — click 'Open WeChat' to resume)")
     elif was_running and no_relaunch:
         log.info("(skipping WeChat re-launch as requested; start it yourself when ready)")
@@ -341,6 +389,16 @@ def _cmd_resnap(workspace: Path, force: bool = False, no_relaunch: bool = False)
 # ---------------------------------------------------------------------------
 # render — assumes plain_dbs already present
 # ---------------------------------------------------------------------------
+
+
+def _suggest_alias(recs, alias: str) -> str:
+    """Return a 'did you mean X / Y?' hint via difflib closest matches."""
+    import difflib
+    pool = [r.alias for r in recs if r.alias] + [r.display_name for r in recs]
+    close = difflib.get_close_matches(alias, pool, n=3, cutoff=0.5)
+    if close:
+        return f"  did you mean: {', '.join(repr(c) for c in close)}?"
+    return ""
 
 
 def _cmd_render(args, workspace: Path, log) -> int:
@@ -357,6 +415,9 @@ def _cmd_render(args, workspace: Path, log) -> int:
         contact = find_by_alias(recs, args.alias)
         if contact is None:
             print(f"[!] alias {args.alias!r} not found")
+            hint = _suggest_alias(recs, args.alias)
+            if hint:
+                print(hint)
             return 2
     else:
         contact = pick(recs, Console())
@@ -366,8 +427,45 @@ def _cmd_render(args, workspace: Path, log) -> int:
     skip = args.skip_recalls and not args.include_recalls
     msgs = list(extract(contact, my_wxid=my_wxid, skip_recalls=skip))
     log.info(f"extracted {len(msgs)} messages")
-    out_dir = workspace / "output"
+    out_dir = (Path(args.out_dir).expanduser().resolve()
+               if getattr(args, "out_dir", None) else workspace / "output")
     return _render_and_chunk(args, msgs, contact, my_wxid, out_dir)
+
+
+def _cmd_preview(args, workspace: Path, log) -> int:
+    """Print the most-recent N messages, no files written."""
+    from wxextract.contacts import find_by_alias, load_contacts
+    from wxextract.messages import extract
+    from wxextract.render.common import body_of
+    plain = workspace / "plain_dbs"
+    if not plain.is_dir():
+        print(f"[!] no plain_dbs at {plain}. Run `wxextract run` first.")
+        return 2
+    recs = load_contacts(plain)
+    contact = find_by_alias(recs, args.alias)
+    if contact is None:
+        print(f"[!] alias {args.alias!r} not found")
+        hint = _suggest_alias(recs, args.alias)
+        if hint:
+            print(hint)
+        return 2
+    my_wxid = _detect_my_wxid(workspace) or "wxid_unknown"
+    msgs = list(extract(contact, my_wxid=my_wxid))
+    if not msgs:
+        print(f"(no messages with {contact.display_name})")
+        return 0
+    tail = msgs[-args.tail:]
+    me_label = args.my_label
+    other_label = contact.display_name
+    print(f"# {other_label} ({contact.alias or contact.username}) — last {len(tail)} of {len(msgs)} messages")
+    print()
+    for m in tail:
+        from datetime import datetime as _dt
+        dt = _dt.fromtimestamp(m.create_time).strftime("%Y-%m-%d %H:%M:%S")
+        who = me_label if m.is_me else other_label
+        body = body_of(m).text or ""
+        print(f"[{dt}] {who}: {body}")
+    return 0
 
 
 # ---------------------------------------------------------------------------
@@ -375,10 +473,16 @@ def _cmd_render(args, workspace: Path, log) -> int:
 # ---------------------------------------------------------------------------
 
 
+def _account_dir_arg(args) -> Path | None:
+    v = getattr(args, "account_dir", None)
+    return Path(v).expanduser().resolve() if v else None
+
+
 def _cmd_run(args, workspace: Path, log) -> int:
     rc = _cmd_resnap(workspace,
                      force=getattr(args, "force", False),
-                     no_relaunch=getattr(args, "no_relaunch", False))
+                     no_relaunch=getattr(args, "no_relaunch", False),
+                     account_dir=_account_dir_arg(args))
     if rc != 0:
         return rc
     return _cmd_render(args, workspace, log)
@@ -432,10 +536,16 @@ def _render_and_chunk(args, msgs, contact, my_wxid: str, out_dir: Path) -> int:
             my_label=args.my_label,
             squash=getattr(args, "squash_emoji", False),
             redact=getattr(args, "redact", False),
+            stickers_to_emoji=getattr(args, "sticker_emojis", False),
         )
         if fmt == "txt-b":
-            render_kwargs = dict(common_kw, gap_seconds=args.gap,
-                                 turn_merge=not args.no_turn_merge)
+            render_kwargs = dict(
+                common_kw,
+                gap_seconds=args.gap,
+                turn_merge=not args.no_turn_merge,
+                time_precision=getattr(args, "time_precision", "seconds"),
+                reply_preview=getattr(args, "reply_preview", "full"),
+            )
         elif fmt == "xml":
             render_kwargs = dict(common_kw, gap_seconds=args.gap)
         elif fmt == "jsonl":

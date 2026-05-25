@@ -45,9 +45,19 @@ from wxextract.tokens import fmt_short
 QUOTE_PREVIEW_MAX = 40
 
 
-def _fmt_time(ts: int, prev_ts: int | None) -> str:
+def _fmt_time(ts: int, prev_ts: int | None, precision: str = "seconds") -> str:
     """Abbreviate timestamp relative to prev_ts (None = first in session)."""
     dt = datetime.fromtimestamp(ts)
+    if precision == "minutes":
+        if prev_ts is None:
+            return dt.strftime("%H:%M")
+        pdt = datetime.fromtimestamp(prev_ts)
+        if dt.hour == pdt.hour and dt.minute == pdt.minute:
+            return ""  # same minute as previous → omit time entirely
+        if dt.hour == pdt.hour:
+            return dt.strftime(":%M")
+        return dt.strftime("%H:%M")
+    # default: seconds
     if prev_ts is None:
         return dt.strftime("%H:%M:%S")
     pdt = datetime.fromtimestamp(prev_ts)
@@ -74,18 +84,26 @@ def _truncate(text: str, n: int = QUOTE_PREVIEW_MAX) -> str:
     return text[: n - 1] + "…"
 
 
-def _render_body(body: Body, identity: Identity) -> str:
-    """Apply quoted-reply inlining (Style B = single line)."""
+def _render_body(body: Body, identity: Identity, reply_preview: str = "full") -> str:
+    """Apply quoted-reply inlining (Style B = single line).
+
+    reply_preview ∈ {full, short, none}:
+      full  — `[↩R 17:38 "first 40 chars…"]`  (default, max context)
+      short — `[↩R 17:38]`                     (sender + time, no preview)
+      none  — `[↩R]`                           (sender only)
+    """
     if body.reply is not None:
-        # resolve reply sender letter via identity, fall back to displayname
-        rletter = identity.by_username.get(body.reply.sender_username, "")
-        if not rletter:
-            rletter = "?"
+        rletter = identity.by_username.get(body.reply.sender_username, "") or "?"
+        head = body.text or ""
+        if reply_preview == "none":
+            return f"{head} [↩{rletter}]".strip()
         rtime = ""
         if body.reply.ts:
             rtime = " " + datetime.fromtimestamp(body.reply.ts).strftime("%H:%M")
+        if reply_preview == "short":
+            return f"{head} [↩{rletter}{rtime}]".strip()
+        # full
         preview = _truncate(body.reply.content)
-        head = body.text or ""
         return f'{head} [↩{rletter}{rtime} "{preview}"]'.strip()
     return body.text
 
@@ -105,6 +123,9 @@ def _render_session(
     turn_window: int,
     squash: bool = False,
     redact: bool = False,
+    stickers_to_emoji: bool = False,
+    time_precision: str = "seconds",
+    reply_preview: str = "full",
 ) -> str:
     """Render one session into `out`. Returns the new last_session_day."""
     sd = datetime.fromtimestamp(sess.start_ts)
@@ -119,8 +140,8 @@ def _render_session(
     prev_letter: str | None = None
     line_open = False
     for m in sess.messages:
-        body = body_of(m, squash=squash, redact=redact)
-        text = _render_body(body, identity)
+        body = body_of(m, squash=squash, redact=redact, stickers_to_emoji=stickers_to_emoji)
+        text = _render_body(body, identity, reply_preview=reply_preview)
         letter = letter_for(identity, m)
         if (
             turn_merge
@@ -133,8 +154,10 @@ def _render_session(
         else:
             if line_open:
                 out.write("\n")
-            time_s = _fmt_time(m.create_time, prev_ts)
-            out.write(f"{letter} {time_s} {text}")
+            time_s = _fmt_time(m.create_time, prev_ts, precision=time_precision)
+            # if time_s is empty (same-minute mode), drop the gap entirely
+            sep = " " if time_s else ""
+            out.write(f"{letter}{sep}{time_s} {text}".rstrip())
             line_open = True
         prev_ts = m.create_time
         prev_letter = letter
@@ -155,6 +178,9 @@ def render(
     turn_window: int = 60,
     squash: bool = False,
     redact: bool = False,
+    stickers_to_emoji: bool = False,
+    time_precision: str = "seconds",
+    reply_preview: str = "full",
 ) -> tuple[int, int]:
     """Write the Style B file; return (lines_written, token_count)."""
     identity = build_identity(messages, contact, my_wxid, my_label=my_label)
@@ -165,6 +191,8 @@ def render(
         last_day = _render_session(
             sess, identity, buf, last_day, turn_merge=turn_merge,
             turn_window=turn_window, squash=squash, redact=redact,
+            stickers_to_emoji=stickers_to_emoji,
+            time_precision=time_precision, reply_preview=reply_preview,
         )
     body_text = buf.getvalue()
 

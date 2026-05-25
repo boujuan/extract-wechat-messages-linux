@@ -177,12 +177,49 @@ def _appmsg_body(content: str, sub: int, sender_label: str = "") -> Body:
 
 
 _EMOJI_RUN_RE = re.compile(r"(\[[A-Za-z]{2,16}\])\1{2,}")
+
+# Common WeChat sticker/emoji tags → Unicode replacements.
+# Kept conservative: only tags where the Unicode is unambiguously equivalent
+# semantically. Unmatched tags pass through unchanged.
+_STICKER_TO_EMOJI = {
+    "[Smile]": "🙂", "[Grin]": "😁", "[Chuckle]": "😄", "[Laugh]": "😆",
+    "[Joyful]": "😂", "[ROFL]": "🤣",
+    "[Wow]": "😮", "[Surprised]": "😲", "[Speechless]": "😶",
+    "[Sad]": "😢", "[Cry]": "😭", "[Tears]": "😭",
+    "[Sweat]": "😅", "[ColdSweat]": "😰", "[Awkward]": "😅",
+    "[Facepalm]": "🤦", "[Sneer]": "😏", "[Trick]": "😏",
+    "[Shy]": "☺️", "[Blush]": "😊",
+    "[Heart]": "❤️", "[Broken]": "💔",
+    "[Yeah]": "👍", "[OK]": "👌", "[Clap]": "👏", "[Strong]": "💪",
+    "[Pray]": "🙏", "[Wave]": "👋",
+    "[Cake]": "🎂", "[Gift]": "🎁", "[Rose]": "🌹",
+    "[Sun]": "☀️", "[Moon]": "🌙", "[Star]": "⭐",
+    "[Doge]": "🐶", "[Cat]": "🐱",
+    "[Fire]": "🔥", "[Bomb]": "💣",
+    "[Angry]": "😠", "[Rage]": "😡",
+    "[Sleep]": "😴", "[Sleepy]": "😪",
+    "[Cool]": "😎", "[Sick]": "🤒",
+    "[Think]": "🤔", "[Quiet]": "🤫",
+    "[Bye]": "👋", "[Hug]": "🤗",
+    "[Skull]": "💀",
+}
+_STICKER_RE = re.compile(r"\[[A-Za-z]{2,16}\]")
 _REDACT_RULES = (
     ("email",  re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.-]+\b")),
     ("phone",  re.compile(r"\b(?:\+?\d[\d\s().-]{8,}\d)\b")),
     ("iban",   re.compile(r"\b[A-Z]{2}\d{2}[A-Z0-9]{10,30}\b")),
     ("digits", re.compile(r"\b\d{12,}\b")),
 )
+
+
+def sticker_to_emoji(text: str) -> str:
+    """Replace known WeChat sticker tags with Unicode equivalents. Unknown tags untouched."""
+    if not text or "[" not in text:
+        return text
+    def repl(m):
+        tag = m.group(0)
+        return _STICKER_TO_EMOJI.get(tag, tag)
+    return _STICKER_RE.sub(repl, text)
 
 
 def squash_emoji_runs(text: str) -> str:
@@ -202,11 +239,14 @@ def redact_pii(text: str) -> str:
     return out
 
 
-def body_of(msg: Message, *, squash: bool = False, redact: bool = False) -> Body:
+def body_of(msg: Message, *, squash: bool = False, redact: bool = False,
+            stickers_to_emoji: bool = False) -> Body:
     """Produce a structured body for any message."""
     t, sub = msg.type, msg.sub_type
     if t == TYPE_TEXT:
         text = msg.content.strip()
+        if stickers_to_emoji:
+            text = sticker_to_emoji(text)
         if squash:
             text = squash_emoji_runs(text)
         if redact:

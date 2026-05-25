@@ -25,6 +25,7 @@ def render(
     *,
     squash: bool = False,
     redact: bool = False,
+    stickers_to_emoji: bool = False,
 ) -> int:
     """Write JSONL; return number of records emitted."""
     identity = build_identity(messages, contact, my_wxid, my_label=my_label)
@@ -52,7 +53,7 @@ def render(
             },
         }, ensure_ascii=False) + "\n")
         for m in messages:
-            body = body_of(m, squash=squash, redact=redact)
+            body = body_of(m, squash=squash, redact=redact, stickers_to_emoji=stickers_to_emoji)
             rec = {
                 "id": m.local_id,
                 "server_id": m.server_id,

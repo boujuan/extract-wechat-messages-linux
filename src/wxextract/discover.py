@@ -17,10 +17,12 @@ from pathlib import Path
 @dataclass
 class Discovery:
     install_version: str | None
-    binary_path: Path | None
+    binary_path: Path | None      # the actual /opt/wechat/wechat or equivalent
+    launch_cmd: list[str]         # what to exec to start WeChat (`/usr/bin/wechat`, `flatpak run …`, etc.)
     data_root: Path
     account_dir: Path
     my_wxid: str
+    install_kind: str = "unknown"  # aur | flatpak | manual | unknown
 
     def db_storage(self) -> Path:
         return self.account_dir / "db_storage"
@@ -47,11 +49,44 @@ def _query_pacman_version() -> str | None:
     return None
 
 
+def _detect_install() -> tuple[str, Path | None, list[str]]:
+    """Detect install variant. Returns (kind, binary_path, launch_cmd).
+
+    kind ∈ {aur, flatpak, manual, unknown}.
+    binary_path = the actual binary that holds WCDB in memory (for PID detection).
+    launch_cmd  = the command list to spawn WeChat (Popen-friendly).
+    """
+    # AUR wechat-bin (also CachyOS, Manjaro AUR)
+    if Path("/opt/wechat/wechat").is_file():
+        launcher = "/usr/bin/wechat" if Path("/usr/bin/wechat").is_file() else "/opt/wechat/wechat"
+        return ("aur", Path("/opt/wechat/wechat"), [launcher])
+
+    # Flatpak — `flatpak info` returns 0 if installed
+    if shutil.which("flatpak"):
+        try:
+            out = subprocess.run(
+                ["flatpak", "info", "com.tencent.wechat"],
+                capture_output=True, timeout=3,
+            )
+            if out.returncode == 0:
+                # Flatpak's main wechat binary lives inside the sandbox; we can only see the wrapper PID
+                wrapper = shutil.which("flatpak")
+                return ("flatpak", None, [wrapper, "run", "com.tencent.wechat"])
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+
+    # Manual install — anything named wechat/weixin on PATH
+    for name in ("wechat", "weixin"):
+        cand = shutil.which(name)
+        if cand:
+            return ("manual", Path(cand), [cand])
+
+    return ("unknown", None, [])
+
+
 def _find_binary() -> Path | None:
-    for cand in ("/opt/wechat/wechat", "/usr/bin/wechat"):
-        if Path(cand).is_file():
-            return Path(cand)
-    return None
+    """Back-compat helper (kept for older callers): returns the binary."""
+    return _detect_install()[1]
 
 
 def _newest_message_mtime(root: Path) -> float:
@@ -117,10 +152,13 @@ def discover(prefer_data_root: Path | None = None, prefer_account: Path | None =
         my_wxid = name.rsplit("_", 1)[0]
     else:
         my_wxid = name
+    kind, binary, launch_cmd = _detect_install()
     return Discovery(
         install_version=_query_pacman_version(),
-        binary_path=_find_binary(),
+        binary_path=binary,
+        launch_cmd=launch_cmd,
         data_root=data_root,
         account_dir=account,
         my_wxid=my_wxid,
+        install_kind=kind,
     )

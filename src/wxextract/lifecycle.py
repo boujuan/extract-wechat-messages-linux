@@ -18,8 +18,9 @@ from pathlib import Path
 log = logging.getLogger("wxextract.lifecycle")
 
 
-MAIN_BINARY = "/opt/wechat/wechat"
-LAUNCH_BINARY = "/usr/bin/wechat"
+# Defaults — used when no Discovery is provided. AUR `wechat-bin` paths.
+DEFAULT_MAIN_BINARY = "/opt/wechat/wechat"
+DEFAULT_LAUNCH_CMD = ["/usr/bin/wechat"]
 _ALL_PATTERNS = ("wechat", "weixin", "RadiumWMPF")
 
 
@@ -44,17 +45,27 @@ def _proc_pids() -> list[tuple[int, str, str]]:
     return out
 
 
-def main_wechat_pid() -> int | None:
-    """Return the PID of the main /opt/wechat/wechat process, or None."""
+def main_wechat_pid(binary: str | None = None) -> int | None:
+    """Return the PID of the main wechat binary process, or None.
+
+    `binary` is the absolute path of the actual binary (from Discovery.binary_path).
+    Falls back to the AUR default if unset (back-compat).
+    """
+    expected = binary or DEFAULT_MAIN_BINARY
     for pid, comm, _exe in _proc_pids():
         if comm.lower() == "wechat":
-            # confirm via exe link
             try:
                 exe = os.readlink(f"/proc/{pid}/exe")
             except OSError:
                 exe = ""
-            if exe == MAIN_BINARY:
+            if exe == expected:
                 return pid
+    # Flatpak sandbox: no host-side exe match. Fall back to any /comm=wechat
+    if binary is None:
+        return None  # don't broaden the default-path behavior
+    for pid, comm, _exe in _proc_pids():
+        if comm.lower() == "wechat":
+            return pid
     return None
 
 
@@ -89,13 +100,14 @@ def _all_dead(pids: list[int]) -> bool:
     return True
 
 
-def close_wechat(timeout: float = 10.0, poll: float = 0.25) -> bool:
+def close_wechat(timeout: float = 10.0, poll: float = 0.25,
+                 binary: str | None = None) -> bool:
     """Send SIGTERM to the main WeChat process; wait for the whole group to exit.
 
     Returns True if WeChat is fully closed (or wasn't running). False if
     something is still alive after `timeout`; caller can decide to escalate.
     """
-    main_pid = main_wechat_pid()
+    main_pid = main_wechat_pid(binary=binary)
     if main_pid is None:
         # maybe orphaned helpers? scan and signal anyway
         leftover = wechat_running()
@@ -133,18 +145,23 @@ def force_kill(pids: list[int] | None = None) -> None:
             pass
 
 
-def launch_wechat() -> int | None:
+def launch_wechat(cmd: list[str] | None = None) -> int | None:
     """Start WeChat in the background, detached from our session.
 
-    Returns the spawned PID (the launcher script), or None if the launcher
-    binary is missing.
+    `cmd` is the launch argv (from Discovery.launch_cmd); falls back to AUR.
     """
-    if not Path(LAUNCH_BINARY).is_file():
-        log.warning(f"{LAUNCH_BINARY} not found; cannot auto-launch")
+    cmd = cmd or DEFAULT_LAUNCH_CMD
+    if not cmd:
+        log.warning("no launch command available; cannot auto-launch")
         return None
-    log.info(f"launching {LAUNCH_BINARY}")
+    head = cmd[0]
+    # if it's a path, verify it exists
+    if head.startswith("/") and not Path(head).is_file():
+        log.warning(f"{head} not found; cannot auto-launch")
+        return None
+    log.info(f"launching {' '.join(cmd)}")
     proc = subprocess.Popen(
-        [LAUNCH_BINARY],
+        cmd,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         start_new_session=True,

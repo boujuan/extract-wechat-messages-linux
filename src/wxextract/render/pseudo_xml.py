@@ -76,6 +76,7 @@ def render(
     gap_seconds: int = 7200,
     squash: bool = False,
     redact: bool = False,
+    stickers_to_emoji: bool = False,
 ) -> tuple[int, int]:
     identity = build_identity(messages, contact, my_wxid, my_label=my_label)
 
@@ -100,7 +101,7 @@ def render(
         sd = datetime.fromtimestamp(sess.start_ts).strftime("%Y-%m-%dT%H:%M:%S")
         buf.write(f'<session start="{sd}">\n')
         for m in sess.messages:
-            body = body_of(m, squash=squash, redact=redact)
+            body = body_of(m, squash=squash, redact=redact, stickers_to_emoji=stickers_to_emoji)
             letter = letter_for(identity, m)
             t = datetime.fromtimestamp(m.create_time).strftime("%H:%M:%S")
             text = escape(body.text or "")

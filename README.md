@@ -55,11 +55,12 @@ Use `--force` to bypass all caches, or `--no-relaunch` to skip the auto-launch
 ## Subcommands
 
 ```
-wxextract status            # what's installed, what's cached
-wxextract list              # show contacts table (after first run)
-wxextract resnap            # close WeChat → fresh snapshot + decrypt → re-open
-wxextract render --alias X  # render without re-snapshotting
-wxextract run               # everything end-to-end (default)
+wxextract status                              # what's installed, what's cached
+wxextract list                                # contacts table (after first run)
+wxextract resnap                              # close WeChat → fresh snapshot + decrypt → re-open
+wxextract render --alias X                    # render without re-snapshotting
+wxextract preview --alias X --tail 20         # print last N messages, no files written
+wxextract run                                 # everything end-to-end (default)
 ```
 
 ## Flags worth knowing
@@ -71,13 +72,36 @@ wxextract run               # everything end-to-end (default)
 --gap SECONDS                    # silence gap that starts a new session (default 7200 = 2h)
 --no-turn-merge                  # one line per message instead of joining with `;`
 --squash-emoji                   # [Tag][Tag][Tag] → [Tag×3]
+--sticker-emojis                 # [Chuckle] → 😄, [Facepalm] → 🤦, etc.
+--time-precision seconds|minutes # timestamp granularity in TXT-B (default: seconds)
+--reply-preview full|short|none  # quote rendering: full content, sender+time, or sender only
 --redact                         # mask emails / phones / IBANs / long digit runs
 --my-label "Me"                  # how to label your own messages
 --include-recalls                # keep "X recalled a message" notifications (default: drop)
 --force                          # bypass all caches; re-extract keys, re-decrypt
 --no-relaunch                    # don't auto-launch WeChat after snapshot
+--out-dir PATH                   # override just the output directory (rendered files)
 --workspace PATH                 # override default workspace location
+--account-dir PATH               # explicit WeChat account folder (for multi-account systems)
 ```
+
+### Compression dial
+
+| Combination | Tokens (11.8k-msg sample) | vs naive plain text |
+|---|---|---|
+| Default (full quotes, seconds) | ~219 k | −51 % |
+| `--time-precision minutes` | ~207 k | −54 % |
+| `+ --reply-preview short` | ~192 k | −57 % |
+| `+ --reply-preview none --sticker-emojis` | **~167 k** | **−63 %** |
+
+### Install variants supported
+
+| Install | Detection | Status |
+|---|---|---|
+| AUR `wechat-bin` | `/opt/wechat/wechat` + `/usr/bin/wechat` launcher | ✅ Primary target |
+| Flatpak `com.tencent.wechat` | `flatpak info com.tencent.wechat` | ✅ Auto-detected; launched via `flatpak run` |
+| Manual install | `which wechat` / `which weixin` | ⚠️ Best-effort |
+| Wine WeChat 3.x | — | ❌ Different storage layout |
 
 ## Style B (compact TXT) at a glance
 
