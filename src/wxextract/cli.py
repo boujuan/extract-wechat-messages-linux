@@ -226,6 +226,82 @@ _ESSENTIAL_DBS = ("message/message_0.db", "message/message_1.db",
                   "message/biz_message_0.db", "contact/contact.db")
 
 
+def _content_stats(db_storage: Path, keys_by_rel: dict[str, str]) -> dict[str, int]:
+    """Sum of rows across every Msg_<hash> table in each message_*.db, via sqlcipher CLI.
+
+    This catches drift the mtime check misses (sync-in-progress, WAL-only writes).
+    Cost ~0.2-0.5s per shard.
+    """
+    import shutil as _sh
+    import subprocess as _sp
+    if not _sh.which("sqlcipher"):
+        return {}
+    out: dict[str, int] = {}
+    for rel, key_hex in keys_by_rel.items():
+        if not rel.startswith("message/message_") or "fts" in rel or "resource" in rel:
+            continue
+        p = db_storage / rel
+        if not p.is_file():
+            continue
+        sql = (
+            f"PRAGMA key = \"x'{key_hex}'\";\n"
+            "PRAGMA cipher_compatibility = 4;\n"
+            "SELECT COALESCE(SUM(cnt), 0) FROM (\n"
+            "  SELECT (SELECT COUNT(*) FROM pragma_table_info(name)) AS _,"
+            "         (SELECT COUNT(*) FROM (SELECT 1 FROM \"' || name || '\")) AS cnt"
+            "  FROM sqlite_master WHERE type='table' AND name LIKE 'Msg_%'\n"
+            ");\n"
+        )
+        # The dynamic-name COUNT(*) above is tricky to do portably; fall back to
+        # listing tables then COUNT(*)-per-table in Python.
+        list_sql = (
+            f"PRAGMA key = \"x'{key_hex}'\";\n"
+            "PRAGMA cipher_compatibility = 4;\n"
+            "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'Msg_%';\n"
+        )
+        try:
+            res = _sp.run(["sqlcipher", str(p)], input=list_sql, text=True,
+                          capture_output=True, timeout=10)
+        except (_sp.TimeoutExpired, OSError):
+            continue
+        if res.returncode != 0:
+            continue
+        tables = [t for t in res.stdout.split() if t.startswith("Msg_")]
+        if not tables:
+            out[rel] = 0
+            continue
+        union_sql = (
+            f"PRAGMA key = \"x'{key_hex}'\";\n"
+            "PRAGMA cipher_compatibility = 4;\n"
+            + " ".join(f"SELECT COUNT(*) FROM {t};" for t in tables)
+        )
+        try:
+            res2 = _sp.run(["sqlcipher", str(p)], input=union_sql, text=True,
+                           capture_output=True, timeout=15)
+        except (_sp.TimeoutExpired, OSError):
+            continue
+        if res2.returncode != 0:
+            continue
+        total = sum(int(x) for x in res2.stdout.split() if x.isdigit())
+        out[rel] = total
+    return out
+
+
+def _save_snapshot_stats(workspace: Path, stats: dict[str, int]) -> None:
+    p = workspace / "snapshot_stats.json"
+    p.write_text(json.dumps(stats, indent=2))
+
+
+def _load_snapshot_stats(workspace: Path) -> dict[str, int] | None:
+    p = workspace / "snapshot_stats.json"
+    if not p.is_file():
+        return None
+    try:
+        return json.loads(p.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
 def _snapshot_is_fresh(live: Path, snap: Path) -> bool:
     """True iff the DBs that actually carry user-visible conversation data
     (message shards + contact list, plus their WAL/SHM sidecars) have identical
@@ -302,8 +378,29 @@ def _cmd_resnap(workspace: Path, force: bool = False, no_relaunch: bool = False,
         and _snapshot_is_fresh(d.db_storage(), snapshot.db_storage_of(snap_root))
         and plain_dbs.is_dir()
     ):
-        log.info("snapshot is fresh — nothing to do (no close/snap/decrypt needed)")
-        return 0
+        # Mtime+size check passed; now content-level drift check via sqlcipher.
+        # Catches the "WeChat just sync'd, mtimes haven't moved yet" window.
+        try:
+            keys_for_check = load_keys(keys_path)
+        except Exception:
+            keys_for_check = {}
+        live_stats = _content_stats(d.db_storage(), keys_for_check)
+        saved = _load_snapshot_stats(workspace)
+        if saved is None:
+            # No baseline — compute snap stats directly to know if snap matches live
+            log.info("no saved stats — measuring snapshot vs live to validate freshness")
+            snap_stats = _content_stats(snapshot.db_storage_of(snap_root), keys_for_check)
+            if snap_stats == live_stats and snap_stats:
+                log.info(f"snapshot matches live ({sum(live_stats.values())} msgs) — fast-path OK; saving baseline")
+                _save_snapshot_stats(workspace, snap_stats)
+                return 0
+            log.info(f"snapshot vs live differ: snap={sum(snap_stats.values())} live={sum(live_stats.values())} — full resnap")
+        elif live_stats == saved:
+            log.info(f"snapshot is fresh — nothing to do "
+                     f"(content stats match: {sum(live_stats.values())} msgs across {len(live_stats)} shards)")
+            return 0
+        else:
+            log.info(f"content drift detected: live={sum(live_stats.values())} vs baseline={sum(saved.values())} — resnapping")
 
     # ── KEY CACHE CHECK ────────────────────────────────────────────────────────
     cached = None if force else _cached_keys_still_valid(keys_path, d.db_storage())
@@ -382,6 +479,14 @@ def _cmd_resnap(workspace: Path, force: bool = False, no_relaunch: bool = False,
         log.info("(WeChat may show a login confirmation dialog — click 'Open WeChat' to resume)")
     elif was_running and no_relaunch:
         log.info("(skipping WeChat re-launch as requested; start it yourself when ready)")
+    # Save content-stats baseline so the next run can detect drift cheaply
+    try:
+        snap_stats = _content_stats(snapshot.db_storage_of(snap_acct), keys_by_rel)
+        if snap_stats:
+            _save_snapshot_stats(workspace, snap_stats)
+            log.info(f"saved snapshot stats: {sum(snap_stats.values())} msgs across {len(snap_stats)} shards")
+    except Exception as e:
+        log.warning(f"could not save snapshot stats: {e}")
     log.info("resnap complete")
     return 0 if n_failed == 0 else 4
 
