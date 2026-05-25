@@ -40,11 +40,11 @@ def test_chunk_by_tokens_txt_b_respects_budget(messages, contact_record, my_wxid
     chunks = chunk_by_tokens_txt(full.read_text(encoding="utf-8"), max_tokens=20_000)
     if len(chunks) <= 1:
         # not enough data to chunk; just confirm one valid chunk
-        assert chunks and chunks[0].startswith("G:")
+        assert chunks and chunks[0].startswith("META: ")
         return
     # each chunk well-formed, repeated header
     for ch in chunks:
-        assert ch.startswith("G:")
+        assert ch.startswith("META: ")
     # total tokens conserved roughly (header repetition adds overhead)
     full_t = count_tokens(full.read_text(encoding="utf-8"))
     chunk_t = sum(count_tokens(c) for c in chunks)

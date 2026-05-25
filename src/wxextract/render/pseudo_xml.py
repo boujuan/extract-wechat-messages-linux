@@ -27,6 +27,7 @@ from xml.sax.saxutils import escape, quoteattr
 from wxextract.contacts import ContactRecord
 from wxextract.messages import Message
 from wxextract.render.common import (
+    LEGEND_TEXT,
     Body,
     Identity,
     body_of,
@@ -94,6 +95,7 @@ def render(
     )
     gloss_text = " ".join(f"{k}={v}" for k, v in identity.glossary.items())
     buf.write(f"<glossary>{escape(gloss_text)}</glossary>\n")
+    buf.write(f"<legend>{escape(LEGEND_TEXT)}</legend>\n")
 
     for sess in sessionize(messages, gap_seconds=gap_seconds):
         if sess.gap_before > 0:

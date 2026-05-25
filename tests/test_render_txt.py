@@ -8,9 +8,10 @@ def test_compact_txt_renders(messages, contact_record, my_wxid, tmp_path):
     out = tmp_path / "conv.txt"
     lines, tokens = compact_txt.render(messages, contact_record, my_wxid, out)
     text = out.read_text(encoding="utf-8")
-    assert text.startswith("G:")
-    assert "\nMETA:" in text
-    assert f"|msgs={len(messages)}|" in text
+    assert text.startswith("META: ")
+    assert "\nGLOSS: " in text
+    assert "\nLEGEND: " in text
+    assert f"msgs={len(messages)}" in text
     assert "tokens=~" in text
 
 

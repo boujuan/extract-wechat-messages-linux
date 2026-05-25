@@ -114,8 +114,11 @@ def _call_body(content: str) -> Body:
 
 
 def _system_body(content: str) -> Body:
-    """We rely on messages.py to have already filtered recalls; here we just label."""
+    """Render a type=10000 system message. Always returns a Body (no None);
+    recall filtering happens upstream in messages.extract()."""
     text = (content or "").strip()
+    if "recalled a message" in text or "recalled this message" in text or "撤回" in text:
+        return Body(text="[sys:recall]", kind="system", media={"sysmsg_type": "recall"})
     if text.startswith("<?xml") or text.startswith("<sysmsg"):
         root = _parse_xml(text)
         if root is not None:
@@ -178,32 +181,95 @@ def _appmsg_body(content: str, sub: int, sender_label: str = "") -> Body:
 
 _EMOJI_RUN_RE = re.compile(r"(\[[A-Za-z]{2,16}\])\1{2,}")
 
-# Common WeChat sticker/emoji tags → Unicode replacements.
-# Kept conservative: only tags where the Unicode is unambiguously equivalent
-# semantically. Unmatched tags pass through unchanged.
+# WeChat sticker/emoji tag → Unicode replacement.
+# Covers the entire default WeChat "Classic" / "Animated" emoji set as observed
+# in real chats (frequency-ordered for the common ones). Unknown tags pass
+# through unchanged so we never lose information.
 _STICKER_TO_EMOJI = {
+    # smiles / laughs
     "[Smile]": "🙂", "[Grin]": "😁", "[Chuckle]": "😄", "[Laugh]": "😆",
-    "[Joyful]": "😂", "[ROFL]": "🤣",
-    "[Wow]": "😮", "[Surprised]": "😲", "[Speechless]": "😶",
-    "[Sad]": "😢", "[Cry]": "😭", "[Tears]": "😭",
-    "[Sweat]": "😅", "[ColdSweat]": "😰", "[Awkward]": "😅",
-    "[Facepalm]": "🤦", "[Sneer]": "😏", "[Trick]": "😏",
-    "[Shy]": "☺️", "[Blush]": "😊",
-    "[Heart]": "❤️", "[Broken]": "💔",
-    "[Yeah]": "👍", "[OK]": "👌", "[Clap]": "👏", "[Strong]": "💪",
-    "[Pray]": "🙏", "[Wave]": "👋",
+    "[Joyful]": "😂", "[ROFL]": "🤣", "[Snicker]": "🤭",
+    "[Happy]": "😊", "[Blush]": "😊", "[Shy]": "☺️", "[Flushed]": "😳",
+    # tongues / playful
+    "[Tongue]": "😝", "[Drool]": "🤤", "[Slobber]": "🤤",
+    "[Smirk]": "😏", "[Sneer]": "😏", "[Trick]": "😏", "[Sly]": "😏",
+    "[CoolGuy]": "😎", "[Cool]": "😎",
+    # sad / hurt
+    "[Sad]": "😢", "[Cry]": "😭", "[Sob]": "😭", "[Tears]": "😭",
+    "[TearingUp]": "🥲", "[Whimper]": "🥺", "[Hurt]": "😖",
+    "[Disappointed]": "😞", "[LetDown]": "😞", "[Concerned]": "😟",
+    "[Broken]": "💔", "[HeartBroken]": "💔",
+    # tired / sleepy
+    "[Sleep]": "😴", "[Sleepy]": "😪", "[Drowsy]": "😪", "[Yawn]": "🥱",
+    # surprise / shock
+    "[Wow]": "😮", "[Surprised]": "😲", "[Surprise]": "😮",
+    "[Shocked]": "😨", "[Terror]": "😱", "[Tremble]": "😨",
+    # awkward / sweaty
+    "[Sweat]": "😅", "[ColdSweat]": "😰", "[Awkward]": "😅", "[Whew]": "😅",
+    # dizzy / dazed
+    "[Dizzy]": "😵", "[Shrunken]": "🥴", "[Toasted]": "🥴",
+    # angry
+    "[Angry]": "😠", "[Rage]": "😡", "[Scowl]": "😤", "[Pout]": "😤",
+    "[Mad]": "😡",
+    # mouth / face
+    "[Speechless]": "😑", "[Quiet]": "🤫", "[Slight]": "😐",
+    "[Facepalm]": "🤦", "[Grimace]": "😬",
+    "[Puke]": "🤮", "[Sick]": "🤒",
+    # love / kiss
+    "[Heart]": "❤️", "[LoveAtFirstSight]": "😍", "[Kiss]": "😘",
+    "[BlowKiss]": "😘", "[Lips]": "💋",
+    # think / smart
+    "[Think]": "🤔", "[Smart]": "🤓", "[Nerd]": "🤓", "[Idea]": "💡",
+    # hands / gestures
+    "[Yeah]": "👍", "[ThumbsUp]": "👍", "[ThumbDown]": "👎",
+    "[OK]": "👌", "[Clap]": "👏", "[Strong]": "💪", "[GoForIt]": "💪",
+    "[Pray]": "🙏", "[Worship]": "🙏", "[Bow]": "🙇",
+    "[Wave]": "👋", "[Bye]": "👋",
+    "[Shake]": "🤝", "[Handshake]": "🤝",
+    "[Salute]": "🫡", "[Respect]": "🫡",
+    "[NoProb]": "🤷", "[Shrug]": "🤷", "[Whatever]": "🤷",
+    "[Fist]": "✊", "[Punch]": "👊",
+    # eyes
+    "[Onlooker]": "👀", "[Watch]": "👀",
+    "[Cleaver]": "🔪", "[Knife]": "🔪",
+    # food / drink
     "[Cake]": "🎂", "[Gift]": "🎁", "[Rose]": "🌹",
+    "[Watermelon]": "🍉", "[Banana]": "🍌", "[Beer]": "🍺",
+    "[Coffee]": "☕", "[Tea]": "🍵", "[BabyBottle]": "🍼",
+    "[Bread]": "🍞", "[IceCream]": "🍦",
+    # nature
     "[Sun]": "☀️", "[Moon]": "🌙", "[Star]": "⭐",
-    "[Doge]": "🐶", "[Cat]": "🐱",
-    "[Fire]": "🔥", "[Bomb]": "💣",
-    "[Angry]": "😠", "[Rage]": "😡",
-    "[Sleep]": "😴", "[Sleepy]": "😪",
-    "[Cool]": "😎", "[Sick]": "🤒",
-    "[Think]": "🤔", "[Quiet]": "🤫",
-    "[Bye]": "👋", "[Hug]": "🤗",
-    "[Skull]": "💀",
+    "[Cloud]": "☁️", "[Rain]": "🌧️", "[Snow]": "❄️",
+    # animals
+    "[Doge]": "🐶", "[Cat]": "🐱", "[Pig]": "🐷",
+    # objects
+    "[Fire]": "🔥", "[Bomb]": "💣", "[Skull]": "💀",
+    "[Music]": "🎵", "[Headphone]": "🎧",
+    "[Football]": "⚽", "[Soccer]": "⚽", "[Basketball]": "🏀",
+    "[PingPong]": "🏓", "[Mahjong]": "🀄",
+    "[Run]": "🏃", "[Walk]": "🚶",
+    "[Hug]": "🤗",
+    # misc oddballs
+    "[Hammer]": "🔨", "[Tools]": "🔧",
+    "[Poop]": "💩", "[NosePick]": "🤧",
+    "[Smug]": "😏", "[OMG]": "😱", "[Hey]": "🙋",
+    "[Word]": "💬",
+    "[Lol]": "😆", "[Lmao]": "🤣", "[Wtf]": "😳",
 }
-_STICKER_RE = re.compile(r"\[[A-Za-z]{2,16}\]")
+_STICKER_RE = re.compile(r"\[[A-Za-z]{2,20}\]")
+
+
+# Compact legend shown once per file (or per chunk). Explains the file's
+# structure and shorthand so an LLM can interpret without guessing.
+LEGEND_TEXT = (
+    'Chronological 1-on-1 chat. Lines: "<sender> <time> <body>". '
+    'Time shrinks within a session: H:M:S (first) → :M:S (same hour) → :S (same min). '
+    '";" joins same-sender messages within 60s. '
+    '"[↩X H:M \\"…\\"]" = reply to sender X with preview. '
+    '"=YYYY-MM-DD" = new day. "=H:M +Nh" = mid-day gap resume. '
+    'Media placeholders: [img] [voice Ns] [video Ns] [sticker] [call Nm] [file:name] [link:title] [sys:…]. '
+    '[Word]-style tags like [Chuckle] are WeChat built-in stickers (mapped to Unicode emoji where possible).'
+)
 _REDACT_RULES = (
     ("email",  re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.-]+\b")),
     ("phone",  re.compile(r"\b(?:\+?\d[\d\s().-]{8,}\d)\b")),
@@ -239,34 +305,59 @@ def redact_pii(text: str) -> str:
     return out
 
 
+def _apply_text_transforms(text: str, *, squash: bool, redact: bool,
+                           stickers_to_emoji: bool) -> str:
+    if not text:
+        return text
+    if stickers_to_emoji:
+        text = sticker_to_emoji(text)
+    if squash:
+        text = squash_emoji_runs(text)
+    if redact:
+        text = redact_pii(text)
+    return text
+
+
 def body_of(msg: Message, *, squash: bool = False, redact: bool = False,
             stickers_to_emoji: bool = False) -> Body:
-    """Produce a structured body for any message."""
+    """Produce a structured body for any message.
+
+    Transforms (sticker mapping, emoji-run squash, PII redaction) are applied
+    to every text-bearing field — including quoted-reply text and the quote
+    preview — so the same [Tag] in any context is normalized identically.
+    """
     t, sub = msg.type, msg.sub_type
     if t == TYPE_TEXT:
-        text = msg.content.strip()
-        if stickers_to_emoji:
-            text = sticker_to_emoji(text)
-        if squash:
-            text = squash_emoji_runs(text)
-        if redact:
-            text = redact_pii(text)
-        return Body(text=text, kind="text")
-    if t == TYPE_IMAGE:
-        return _image_body(msg.content)
-    if t == TYPE_VOICE:
-        return _voice_body(msg.content)
-    if t == TYPE_VIDEO:
-        return _video_body(msg.content)
-    if t == TYPE_STICKER:
-        return _sticker_body(msg.content)
-    if t == TYPE_APPMSG:
-        return _appmsg_body(msg.content, sub)
-    if t == TYPE_CALL:
-        return _call_body(msg.content)
-    if t == TYPE_SYSTEM:
-        return _system_body(msg.content)
-    return Body(text=f"[type:{t}/{sub}]", kind="unknown", media={"type": t, "sub_type": sub})
+        body = Body(text=msg.content.strip(), kind="text")
+    elif t == TYPE_IMAGE:
+        body = _image_body(msg.content)
+    elif t == TYPE_VOICE:
+        body = _voice_body(msg.content)
+    elif t == TYPE_VIDEO:
+        body = _video_body(msg.content)
+    elif t == TYPE_STICKER:
+        body = _sticker_body(msg.content)
+    elif t == TYPE_APPMSG:
+        body = _appmsg_body(msg.content, sub)
+    elif t == TYPE_CALL:
+        body = _call_body(msg.content)
+    elif t == TYPE_SYSTEM:
+        body = _system_body(msg.content)
+    else:
+        body = Body(text=f"[type:{t}/{sub}]", kind="unknown",
+                    media={"type": t, "sub_type": sub})
+
+    # apply transforms uniformly to every text-bearing field
+    if body is None:
+        return body
+    body.text = _apply_text_transforms(body.text, squash=squash, redact=redact,
+                                       stickers_to_emoji=stickers_to_emoji)
+    if body.reply is not None:
+        body.reply.content = _apply_text_transforms(
+            body.reply.content, squash=squash, redact=redact,
+            stickers_to_emoji=stickers_to_emoji,
+        )
+    return body
 
 
 # ---------------------------------------------------------------------------

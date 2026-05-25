@@ -31,6 +31,7 @@ from pathlib import Path
 from wxextract.contacts import ContactRecord
 from wxextract.messages import Message
 from wxextract.render.common import (
+    LEGEND_TEXT,
     Body,
     Identity,
     Session,
@@ -110,7 +111,11 @@ def _render_body(body: Body, identity: Identity, reply_preview: str = "full") ->
 
 def _glossary_line(identity: Identity) -> str:
     parts = [f"{letter}={display}" for letter, display in identity.glossary.items()]
-    return "G:" + "|".join(parts)
+    return "GLOSS: " + "  ".join(parts)
+
+
+def _legend_line() -> str:
+    return "LEGEND: " + LEGEND_TEXT
 
 
 def _render_session(
@@ -199,15 +204,18 @@ def render(
     first_dt = datetime.fromtimestamp(messages[0].create_time).date() if messages else None
     last_dt = datetime.fromtimestamp(messages[-1].create_time).date() if messages else None
     meta_pre = (
-        f"META:{contact.alias or contact.username}|"
-        f"range={first_dt}..{last_dt}|"
-        f"msgs={len(messages)}|tokens=~"
+        f"META: contact={contact.alias or contact.username} | "
+        f"range={first_dt}..{last_dt} | "
+        f"msgs={len(messages)} | tokens=~"
     )
+    meta_post = ""
     gloss = _glossary_line(identity)
+    legend = _legend_line()
 
-    # estimate tokens once (body + headers approx). Headers are tiny so body dominates.
-    tokens = count_tokens(gloss + "\n" + meta_pre + "PLACEHOLDER\n" + body_text)
-    header = f"{gloss}\n{meta_pre}{fmt_short(tokens)}\n"
+    # estimate tokens once with a placeholder; header is small so body dominates
+    sample = f"{meta_pre}PLACEHOLDER{meta_post}\n{gloss}\n{legend}\n{body_text}"
+    tokens = count_tokens(sample)
+    header = f"{meta_pre}{fmt_short(tokens)}{meta_post}\n{gloss}\n{legend}\n"
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(header + body_text, encoding="utf-8")
