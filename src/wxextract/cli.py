@@ -29,8 +29,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--account-dir", type=str, default=None, metavar="PATH",
                    help="WeChat account folder (xwechat_files/wxid_<id>_<suffix>/). "
                         "Use when multiple accounts are logged in and auto-pick guesses wrong.")
-    p.add_argument("-v", "--verbose", action="store_true", default=True)
-    p.add_argument("-q", "--quiet", action="store_true")
+    p.add_argument("-v", "--verbose", action="store_true",
+                   help="verbose per-stage logging (disables the live progress UI)")
+    p.add_argument("-q", "--quiet", action="store_true",
+                   help="silence all output except errors and the final summary")
+    p.add_argument("--no-progress", action="store_true",
+                   help="disable the rich live progress UI (plain log output instead)")
+    p.add_argument("--no-summary", action="store_true",
+                   help="skip the final summary panel")
 
     sub = p.add_subparsers(dest="command", required=False)
     sub.add_parser("status", help="print discovered WeChat install + workspace state, exit")
@@ -128,27 +134,41 @@ def main(argv: list[str] | None = None) -> int:
     raw = sys.argv[1:] if argv is None else list(argv)
     raw = _inject_default_subcommand(raw)
     args = parser.parse_args(raw)
-    log = setup_logging(verbose=args.verbose, quiet=args.quiet)
+    # With the live progress UI active we want logging quiet to avoid interleaving.
+    # -v restores verbose INFO output (and turns the live UI off automatically).
+    use_progress = not args.verbose and not args.no_progress
+    log = setup_logging(verbose=args.verbose, quiet=args.quiet or use_progress)
     workspace = (Path(args.workspace).expanduser().resolve()
                  if args.workspace else default_workspace())
     cmd = args.command or "run"
 
-    if cmd == "status":
-        return _cmd_status(workspace)
-    if cmd == "list":
-        return _cmd_list(workspace)
-    if cmd == "resnap":
-        return _cmd_resnap(workspace, force=getattr(args, "force", False),
-                           no_relaunch=getattr(args, "no_relaunch", False),
-                           account_dir=_account_dir_arg(args))
-    if cmd == "render":
-        return _cmd_render(args, workspace, log)
-    if cmd == "preview":
-        return _cmd_preview(args, workspace, log)
-    if cmd == "run":
-        return _cmd_run(args, workspace, log)
-    parser.print_help()
-    return 1
+    use_progress = not args.verbose and not args.no_progress and cmd in ("run", "render", "resnap")
+    ui = None
+    if use_progress:
+        from rich.console import Console
+        from wxextract.progress import ProgressUI
+        ui = ProgressUI(console=Console(stderr=True), enabled=True)
+        ui.start()
+    try:
+        if cmd == "status":
+            return _cmd_status(workspace)
+        if cmd == "list":
+            return _cmd_list(workspace)
+        if cmd == "resnap":
+            return _cmd_resnap(workspace, force=getattr(args, "force", False),
+                               no_relaunch=getattr(args, "no_relaunch", False),
+                               account_dir=_account_dir_arg(args), ui=ui)
+        if cmd == "render":
+            return _cmd_render(args, workspace, log, ui=ui)
+        if cmd == "preview":
+            return _cmd_preview(args, workspace, log)
+        if cmd == "run":
+            return _cmd_run(args, workspace, log, ui=ui)
+        parser.print_help()
+        return 1
+    finally:
+        if ui is not None:
+            ui.stop()
 
 
 # ---------------------------------------------------------------------------
@@ -360,13 +380,18 @@ def _cached_keys_still_valid(keys_path: Path, db_storage: Path) -> dict[str, str
 
 
 def _cmd_resnap(workspace: Path, force: bool = False, no_relaunch: bool = False,
-                account_dir: Path | None = None) -> int:
+                account_dir: Path | None = None, ui=None) -> int:
     from wxextract import discover, lifecycle, snapshot
     from wxextract.decrypt import decrypt_all
     from wxextract.keys import collect_dbs, load_keys, save_keys, scan
-    log = setup_logging(verbose=True)
+    import logging
+    log = logging.getLogger("wxextract")
+    if ui:
+        ui.begin("Discover")
     d = discover.discover(prefer_account=account_dir)
     log.info(f"install kind: {d.install_kind}; binary: {d.binary_path}; launch: {' '.join(d.launch_cmd) or '<none>'}")
+    if ui:
+        ui.end("Discover", f"install={d.install_kind}  account={d.account_dir.name}")
     keys_path = workspace / "all_keys.json"
 
     # ── SNAPSHOT-FRESHNESS FAST PATH ──────────────────────────────────────────
@@ -380,6 +405,8 @@ def _cmd_resnap(workspace: Path, force: bool = False, no_relaunch: bool = False,
     ):
         # Mtime+size check passed; now content-level drift check via sqlcipher.
         # Catches the "WeChat just sync'd, mtimes haven't moved yet" window.
+        if ui:
+            ui.begin("Keys", "validating cache + drift check")
         try:
             keys_for_check = load_keys(keys_path)
         except Exception:
@@ -387,27 +414,47 @@ def _cmd_resnap(workspace: Path, force: bool = False, no_relaunch: bool = False,
         live_stats = _content_stats(d.db_storage(), keys_for_check)
         saved = _load_snapshot_stats(workspace)
         if saved is None:
-            # No baseline — compute snap stats directly to know if snap matches live
             log.info("no saved stats — measuring snapshot vs live to validate freshness")
             snap_stats = _content_stats(snapshot.db_storage_of(snap_root), keys_for_check)
             if snap_stats == live_stats and snap_stats:
                 log.info(f"snapshot matches live ({sum(live_stats.values())} msgs) — fast-path OK; saving baseline")
                 _save_snapshot_stats(workspace, snap_stats)
+                if ui:
+                    total = sum(live_stats.values())
+                    ui.end("Keys", f"{len(keys_for_check)} cached keys ✓  (baseline saved: {total:,} msgs)")
+                    ui.skip("Snapshot", "fresh — no changes")
+                    ui.skip("Decrypt", "fresh — no changes")
                 return 0
             log.info(f"snapshot vs live differ: snap={sum(snap_stats.values())} live={sum(live_stats.values())} — full resnap")
+            if ui:
+                ui.end("Keys", f"{len(keys_for_check)} cached keys; drift detected, resnapping")
         elif live_stats == saved:
             log.info(f"snapshot is fresh — nothing to do "
                      f"(content stats match: {sum(live_stats.values())} msgs across {len(live_stats)} shards)")
+            if ui:
+                total = sum(live_stats.values())
+                ui.end("Keys", f"{len(keys_for_check)} cached keys ✓  ({total:,} msgs unchanged)")
+                ui.skip("Snapshot", "fresh — no changes")
+                ui.skip("Decrypt", "fresh — no changes")
             return 0
         else:
             log.info(f"content drift detected: live={sum(live_stats.values())} vs baseline={sum(saved.values())} — resnapping")
+            if ui:
+                delta = sum(live_stats.values()) - sum(saved.values())
+                ui.end("Keys", f"drift detected ({delta:+,} msgs since last snap) — resnapping")
 
     # ── KEY CACHE CHECK ────────────────────────────────────────────────────────
+    if ui and ui.stages["Keys"].status not in ("done", "skipped"):
+        ui.begin("Keys", "validating cached keys vs live DBs")
     cached = None if force else _cached_keys_still_valid(keys_path, d.db_storage())
     if cached is not None:
         log.info(f"keys: reusing {len(cached)} cached keys from {keys_path.name} (validated against live DBs)")
+        if ui:
+            ui.end("Keys", f"{len(cached)} cached keys validated against live")
         keys_by_rel = cached
     else:
+        if ui:
+            ui.begin("Keys", "scanning /proc/<pid>/mem for SQLCipher keys")
         # need WeChat running to scan memory
         if not lifecycle.wechat_running():
             log.info("wechat not running — launching for key extraction")
@@ -452,14 +499,28 @@ def _cmd_resnap(workspace: Path, force: bool = False, no_relaunch: bool = False,
         db_files, _ = collect_dbs(d.db_storage())
         save_keys(scan_res, db_files, d.db_storage(), keys_path)
         keys_by_rel = load_keys(keys_path)
+        if ui:
+            ui.end("Keys", f"{len(scan_res.keys_by_rel)} keys recovered via memory scan in {scan_res.elapsed:.2f}s")
 
     # ── CLOSE → SNAPSHOT → DECRYPT ────────────────────────────────────────────
+    if ui:
+        ui.begin("Snapshot", "closing WeChat for consistent snapshot…")
     was_running = bool(lifecycle.wechat_running())
     if was_running:
         bin_str = str(d.binary_path) if d.binary_path else None
         if not lifecycle.close_wechat(binary=bin_str):
             log.warning("wechat did not close cleanly within 10s; continuing anyway")
+    if ui:
+        ui.detail("Snapshot", "rsync -aH …")
     snap_acct = snapshot.snapshot(d.account_dir, workspace / "snapshot")
+    try:
+        snap_size = sum(p.stat().st_size for p in (workspace / "snapshot").rglob("*") if p.is_file())
+    except OSError:
+        snap_size = 0
+    if ui:
+        from wxextract.progress import _human_bytes
+        ui.end("Snapshot", f"{_human_bytes(snap_size)} synced to workspace/snapshot/")
+        ui.begin("Decrypt", f"decrypting {len(keys_by_rel)} databases (parallel)…")
     decrypt_results = decrypt_all(
         snapshot.db_storage_of(snap_acct),
         keys_by_rel,
@@ -474,6 +535,11 @@ def _cmd_resnap(workspace: Path, force: bool = False, no_relaunch: bool = False,
         for r in decrypt_results:
             if not r.ok:
                 log.error(f"  failed: {r.rel}: {r.error}")
+    if ui:
+        detail = f"{n_fresh} re-decrypted, {n_skipped} unchanged"
+        if n_failed:
+            detail += f", {n_failed} FAILED"
+        ui.end("Decrypt", detail) if n_failed == 0 else ui.fail("Decrypt", detail)
     if was_running and not no_relaunch:
         lifecycle.launch_wechat(cmd=d.launch_cmd or None)
         log.info("(WeChat may show a login confirmation dialog — click 'Open WeChat' to resume)")
@@ -506,7 +572,7 @@ def _suggest_alias(recs, alias: str) -> str:
     return ""
 
 
-def _cmd_render(args, workspace: Path, log) -> int:
+def _cmd_render(args, workspace: Path, log, ui=None) -> int:
     from wxextract.contacts import find_by_alias, load_contacts
     from wxextract.messages import extract
     from wxextract.picker import pick
@@ -514,27 +580,58 @@ def _cmd_render(args, workspace: Path, log) -> int:
     if not plain.is_dir():
         print(f"[!] no plain_dbs at {plain}. Run `wxextract run` first.")
         return 2
+    if ui:
+        ui.begin("Contacts", "loading contact list…")
     recs = load_contacts(plain)
     contact = None
     if args.alias:
         contact = find_by_alias(recs, args.alias)
         if contact is None:
+            if ui:
+                ui.fail("Contacts", f"alias {args.alias!r} not found")
+                ui.stop()
             print(f"[!] alias {args.alias!r} not found")
             hint = _suggest_alias(recs, args.alias)
             if hint:
                 print(hint)
             return 2
     else:
+        if ui:
+            ui.stop()                     # pause UI for interactive picker
         contact = pick(recs, Console())
         if contact is None:
             return 0
+        if ui:
+            ui.start()
+    if ui:
+        ui.end("Contacts", f"{contact.display_name} ({contact.alias or contact.username}) — {contact.message_count:,} msgs total")
+        ui.begin("Extract", "walking message table…")
     my_wxid = _detect_my_wxid(workspace) or "wxid_unknown"
     skip = args.skip_recalls and not args.include_recalls
-    msgs = list(extract(contact, my_wxid=my_wxid, skip_recalls=skip))
+    # always read with skip=False so we can report the recall count, then filter
+    msgs_all = list(extract(contact, my_wxid=my_wxid, skip_recalls=False))
+    if skip:
+        msgs = [m for m in msgs_all if not _is_recall_msg(m)]
+    else:
+        msgs = msgs_all
+    recall_count = len(msgs_all) - len(msgs)
     log.info(f"extracted {len(msgs)} messages")
+    if ui:
+        d = f"{len(msgs):,} messages"
+        if recall_count:
+            d += f"  ({recall_count} recalls filtered)"
+        ui.end("Extract", d)
     out_dir = (Path(args.out_dir).expanduser().resolve()
                if getattr(args, "out_dir", None) else workspace / "output")
-    return _render_and_chunk(args, msgs, contact, my_wxid, out_dir)
+    rc, outputs = _render_and_chunk(args, msgs, contact, my_wxid, out_dir, ui=ui)
+    if rc == 0 and outputs and not getattr(args, "no_summary", False):
+        _print_summary(contact, msgs, recall_count, outputs, workspace, ui)
+    return rc
+
+
+def _is_recall_msg(m) -> bool:
+    from wxextract.messages import _is_recall
+    return _is_recall(m.type, m.content)
 
 
 def _cmd_preview(args, workspace: Path, log) -> int:
@@ -583,14 +680,15 @@ def _account_dir_arg(args) -> Path | None:
     return Path(v).expanduser().resolve() if v else None
 
 
-def _cmd_run(args, workspace: Path, log) -> int:
+def _cmd_run(args, workspace: Path, log, ui=None) -> int:
     rc = _cmd_resnap(workspace,
                      force=getattr(args, "force", False),
                      no_relaunch=getattr(args, "no_relaunch", False),
-                     account_dir=_account_dir_arg(args))
+                     account_dir=_account_dir_arg(args),
+                     ui=ui)
     if rc != 0:
         return rc
-    return _cmd_render(args, workspace, log)
+    return _cmd_render(args, workspace, log, ui=ui)
 
 
 # ---------------------------------------------------------------------------
@@ -607,7 +705,9 @@ def _detect_my_wxid(workspace: Path) -> str | None:
     return name.rsplit("_", 1)[0] if name.count("_") >= 2 else name
 
 
-def _render_and_chunk(args, msgs, contact, my_wxid: str, out_dir: Path) -> int:
+def _render_and_chunk(args, msgs, contact, my_wxid: str, out_dir: Path,
+                      ui=None) -> tuple[int, list[tuple[str, Path]]]:
+    """Render every requested format (+chunk). Returns (exit_code, [(fmt, path)])."""
     from wxextract.chunker import chunk_by_tokens, chunk_calendar
     from wxextract.render import compact_txt, jsonl, pseudo_xml
     formats = [f.strip() for f in args.format.split(",") if f.strip()]
@@ -627,16 +727,20 @@ def _render_and_chunk(args, msgs, contact, my_wxid: str, out_dir: Path) -> int:
         chunk_kind = chunk_arg
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    summary: list[tuple[str, int, int, int]] = []   # (path, bytes, lines, tokens)
+    outputs: list[tuple[str, Path]] = []
+
+    if ui:
+        ui.begin("Render", f"{len(formats)} format(s): {', '.join(formats)}")
+
     for fmt in formats:
         if fmt not in render_map:
             print(f"[!] unknown format {fmt!r}; choose from {sorted(render_map)}")
             continue
+        if ui:
+            ui.detail("Render", f"writing {fmt}…")
         mod, ext = render_map[fmt]
         out_path = out_dir / f"{base_name}.{ext}"
 
-        # render
-        render_kwargs = {}
         common_kw = dict(
             my_label=args.my_label,
             squash=getattr(args, "squash_emoji", False),
@@ -653,17 +757,14 @@ def _render_and_chunk(args, msgs, contact, my_wxid: str, out_dir: Path) -> int:
             )
         elif fmt == "xml":
             render_kwargs = dict(common_kw, gap_seconds=args.gap)
-        elif fmt == "jsonl":
+        else:                                              # jsonl
             render_kwargs = dict(common_kw)
 
         if chunk_kind in ("month", "week", "day"):
             paths = chunk_calendar(msgs, contact, my_wxid, mod.render, out_path,
                                    chunk_kind, **render_kwargs)
         else:
-            if fmt == "jsonl":
-                mod.render(msgs, contact, my_wxid, out_path, **render_kwargs)
-            else:
-                mod.render(msgs, contact, my_wxid, out_path, **render_kwargs)
+            mod.render(msgs, contact, my_wxid, out_path, **render_kwargs)
             paths = [out_path]
             if chunk_kind == "tokens":
                 paths = chunk_by_tokens(out_path, chunk_tokens, fmt=fmt)
@@ -671,20 +772,49 @@ def _render_and_chunk(args, msgs, contact, my_wxid: str, out_dir: Path) -> int:
                     out_path.unlink()
                 except FileNotFoundError:
                     pass
-
-        from wxextract.tokens import count as count_tokens
         for p in paths:
-            text = p.read_text(encoding="utf-8")
-            sz = p.stat().st_size
-            ln = text.count("\n")
-            tk = count_tokens(text)
-            summary.append((str(p), sz, ln, tk))
+            outputs.append((fmt, p))
 
-    print()
-    print("Output:")
-    for path, sz, ln, tk in summary:
-        print(f"  {path:60s}  {human_bytes(sz):>10s}  {ln:>7,d} lines  {tk:>10,d} tokens")
-    return 0
+    if ui:
+        ui.end("Render", f"{len(outputs)} file(s) written")
+        if chunk_kind != "none":
+            ui.end("Chunk", f"chunked by {chunk_kind} → {len(outputs)} parts across {len(formats)} formats")
+        else:
+            ui.skip("Chunk", "no chunking requested")
+    return 0, outputs
+
+
+def _print_summary(contact, msgs, recall_count, outputs, workspace, ui):
+    """Compute per-file stats and print the final summary panel."""
+    import shutil as _sh
+    from datetime import datetime
+    from rich.console import Console
+    from wxextract.progress import file_stats, render_summary
+
+    if ui:
+        ui.stop()
+
+    stats = [file_stats(p, fmt) for fmt, p in outputs]
+
+    first = datetime.fromtimestamp(msgs[0].create_time).date()
+    last = datetime.fromtimestamp(msgs[-1].create_time).date()
+    total_days = (last - first).days + 1
+
+    total_time = (time.perf_counter() - ui.t0) if ui else 0.0
+    # use the real terminal width when available, otherwise pick something
+    # wide enough that the table doesn't wrap when output is piped.
+    width = _sh.get_terminal_size((140, 24)).columns
+    render_summary(
+        Console(width=max(width, 120)),
+        contact=contact,
+        message_count=len(msgs),
+        recall_count=recall_count,
+        date_range=(first.isoformat(), last.isoformat()),
+        total_days=total_days,
+        total_time=total_time,
+        outputs=stats,
+        workspace=workspace,
+    )
 
 
 if __name__ == "__main__":
