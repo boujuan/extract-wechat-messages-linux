@@ -197,6 +197,38 @@ def build_parser() -> argparse.ArgumentParser:
     g_resnap.add_argument("--no-relaunch", action="store_true",
                           help="Don't re-launch WeChat afterwards (avoids the login-confirm dialog).")
 
+    sp = sub.add_parser("cleanup",
+                        help="Delete cached workspace data (snapshot, decrypted DBs, "
+                             "rendered outputs, keys, etc.) and the update-check cache.",
+                        description="Selectively wipe wxextract's persisted state. "
+                                    "Without category flags, defaults to --all. "
+                                    "By default prompts for confirmation; use --yes to skip.",
+                        formatter_class=Formatter)
+    g_cat = sp.add_argument_group("What to remove (combinable; --all wins)")
+    g_cat.add_argument("--all", action="store_true",
+                       help="Wipe the entire workspace + the XDG cache "
+                            "(equivalent to every category flag below).")
+    g_cat.add_argument("--snapshot", action="store_true",
+                       help="The rsync mirror of encrypted DBs (~700 MB).")
+    g_cat.add_argument("--plain-dbs", action="store_true",
+                       help="The decrypted SQLite databases (~230 MB).")
+    g_cat.add_argument("--output", action="store_true",
+                       help="Rendered conversation files (.txt / .xml / .jsonl / .md).")
+    g_cat.add_argument("--media", action="store_true",
+                       help="Decrypted .dat → .jpg/png/gif images.")
+    g_cat.add_argument("--keys", action="store_true",
+                       help="all_keys.json + image_key.json (sensitive; need re-scan).")
+    g_cat.add_argument("--state", action="store_true",
+                       help="last_extract.json + snapshot_stats.json "
+                            "(per-contact incremental baselines + drift baseline).")
+    g_cat.add_argument("--cache", action="store_true",
+                       help="The XDG cache (update-check timestamp).")
+    g_mode = sp.add_argument_group("How")
+    g_mode.add_argument("--dry-run", action="store_true",
+                        help="Show what would be deleted; don't actually delete.")
+    g_mode.add_argument("--yes", "-y", action="store_true",
+                        help="Skip the confirmation prompt.")
+
     sp = sub.add_parser("images",
                         help="Decrypt WeChat .dat image attachments into JPG/PNG/GIF/etc.",
                         description="Walk the message-attachment tree for a contact (or all) and "
@@ -275,7 +307,8 @@ def _inject_default_subcommand(argv: list[str]) -> list[str]:
     top_level = {"--workspace", "--account-dir", "-v", "--verbose", "-q", "--quiet",
                  "--no-progress", "--no-summary", "--no-update-check"}
     top_level_takes_arg = {"--workspace", "--account-dir"}
-    subs = {"status", "list", "resnap", "run", "render", "preview", "stats", "images"}
+    subs = {"status", "list", "resnap", "run", "render", "preview",
+            "stats", "images", "cleanup"}
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -357,6 +390,8 @@ def _main(argv: list[str] | None = None) -> int:
             return _cmd_stats(args, workspace, log)
         if cmd == "images":
             return _cmd_images(args, workspace, log)
+        if cmd == "cleanup":
+            return _cmd_cleanup(args, workspace, log)
         if cmd == "run":
             return _cmd_run(args, workspace, log, ui=ui)
         parser.print_help()
@@ -1137,6 +1172,122 @@ def _cmd_images(args, workspace: Path, log) -> int:
     print(f"images: v1={n_v1}  v2={n_v2}  failed={n_failed}  v2-skipped(decrypt-fail)={n_skipped}")
     if n_v2 == 0 and n_skipped > 0:
         print("       (no V2 images decrypted successfully — try --force-image-key to re-scan)")
+    return 0
+
+
+def _cmd_cleanup(args, workspace: Path, log) -> int:
+    """Selectively wipe workspace + XDG cache."""
+    import shutil
+
+    def _dir_size(p: Path) -> int:
+        try:
+            return sum(f.stat().st_size for f in p.rglob("*") if f.is_file())
+        except OSError:
+            return 0
+
+    def _human(n: int) -> str:
+        f = float(n)
+        for unit in ("B", "KB", "MB", "GB"):
+            if f < 1024:
+                return f"{f:.0f} {unit}" if unit == "B" else f"{f:.1f} {unit}"
+            f /= 1024
+        return f"{f:.1f} TB"
+
+    # XDG cache for update-check
+    from wxextract.update_check import _cache_dir as _xdg_cache_dir
+    xdg_cache = _xdg_cache_dir()
+
+    # If no category flag was given, default to --all
+    any_category = any(getattr(args, f, False) for f in
+                       ("all", "snapshot", "plain_dbs", "output",
+                        "media", "keys", "state", "cache"))
+    if not any_category:
+        args.all = True
+
+    do_all = getattr(args, "all", False)
+    plan: list[tuple[str, Path, str]] = []   # (category, path, why)
+
+    def _consider(category: str, path: Path, desc: str, requested: bool):
+        if (do_all or requested) and path.exists():
+            plan.append((category, path, desc))
+
+    _consider("snapshot",  workspace / "snapshot",            "encrypted DB snapshot tree",  args.snapshot)
+    _consider("plain_dbs", workspace / "plain_dbs",           "decrypted SQLite DBs",        args.plain_dbs)
+    _consider("output",    workspace / "output",              "rendered conversation files", args.output)
+    _consider("media",     workspace / "media",               "decrypted images",            args.media)
+    _consider("keys",      workspace / "all_keys.json",       "SQLCipher DB keys",           args.keys)
+    _consider("keys",      workspace / "image_key.json",      "V2 image AES key",            args.keys)
+    _consider("state",     workspace / "last_extract.json",   "per-contact --since-last baselines", args.state)
+    _consider("state",     workspace / "snapshot_stats.json", "drift-detection baseline",    args.state)
+    _consider("cache",     xdg_cache,                          "XDG cache (update check)",    args.cache)
+
+    if not plan:
+        print("Nothing to clean up — workspace and cache are already empty.")
+        return 0
+
+    # render plan
+    from rich.box import ROUNDED
+    from rich.console import Console
+    from rich.panel import Panel
+    from rich.table import Table
+    from rich.text import Text
+
+    cons = Console()
+    t = Table(box=ROUNDED, show_header=True, header_style="bold cyan")
+    t.add_column("Category", style="bold")
+    t.add_column("Path")
+    t.add_column("Size", justify="right", style="yellow")
+    t.add_column("Description", style="dim italic")
+    total = 0
+    for category, path, desc in plan:
+        sz = _dir_size(path) if path.is_dir() else path.stat().st_size
+        total += sz
+        t.add_row(category, str(path), _human(sz), desc)
+    t.add_section()
+    t.add_row(Text("TOTAL", style="bold red"),
+              "", Text(_human(total), style="bold red"), "")
+
+    cons.print()
+    cons.print(Panel(t,
+                     title=Text("wxextract cleanup — plan",
+                                style="bold red" if not args.dry_run else "bold yellow"),
+                     border_style="red" if not args.dry_run else "yellow",
+                     expand=False, padding=(1, 2)))
+
+    if args.dry_run:
+        print("Dry run only — nothing deleted. Re-run without --dry-run to apply.")
+        return 0
+
+    if not args.yes:
+        try:
+            from rich.prompt import Confirm
+            if not Confirm.ask(
+                f"\n[bold red]Delete {len(plan)} item(s) ({_human(total)})?[/bold red]",
+                default=False, console=cons,
+            ):
+                print("Aborted.")
+                return 1
+        except (KeyboardInterrupt, EOFError):
+            print("\nAborted.")
+            return 1
+
+    # actually delete
+    n_files = n_dirs = 0
+    for _category, path, _desc in plan:
+        try:
+            if path.is_dir():
+                shutil.rmtree(path)
+                n_dirs += 1
+                log.info(f"  removed {path}/")
+            else:
+                path.unlink()
+                n_files += 1
+                log.info(f"  removed {path}")
+        except OSError as e:
+            log.error(f"  failed to remove {path}: {e}")
+    print(f"Cleanup complete: removed {n_dirs} director{'y' if n_dirs == 1 else 'ies'} "
+          f"and {n_files} file{'s' if n_files != 1 else ''} "
+          f"({_human(total)} total).")
     return 0
 
 
