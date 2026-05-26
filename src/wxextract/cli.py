@@ -60,8 +60,15 @@ _EPILOG = (
 def _add_common_render_args(sp, *, include_pipeline: bool = False):
     """Shared argument groups for the `run` and `render` subcommands."""
     g_sel = sp.add_argument_group("Conversation selection")
-    g_sel.add_argument("--alias", metavar="WECHAT_ID",
-                       help="WeChat ID of the contact to extract (skips the interactive picker).")
+    g_sel.add_argument("--alias", metavar="WECHAT_ID[,WECHAT_ID,...]",
+                       help="WeChat ID of the contact(s) to extract (comma-separated for several). "
+                            "Skips the interactive picker.")
+    g_sel.add_argument("--all-contacts", action="store_true",
+                       help="Extract every contact with messages. Implies sequential processing; "
+                            "one set of files per contact in --out-dir.")
+    g_sel.add_argument("--min-messages", type=int, default=1, metavar="N",
+                       help="With --all-contacts, only render contacts with ≥ N messages. "
+                            "Default: %(default)s.")
     g_sel.add_argument("--include-recalls", action="store_true",
                        help="Keep \"X recalled a message\" notifications (default: filter them out).")
     g_sel.add_argument("--since-last", action="store_true",
@@ -681,9 +688,10 @@ def _suggest_alias(recs, alias: str) -> str:
 
 
 def _cmd_render(args, workspace: Path, log, ui=None) -> int:
+    """Render one contact (or many via --alias=a,b or --all-contacts)."""
     from wxextract.contacts import find_by_alias, load_contacts
-    from wxextract.messages import extract
     from wxextract.picker import pick
+    t_start = time.perf_counter()
     plain = workspace / "plain_dbs"
     if not plain.is_dir():
         print(f"[!] no plain_dbs at {plain}. Run `wxextract run` first.")
@@ -691,37 +699,111 @@ def _cmd_render(args, workspace: Path, log, ui=None) -> int:
     if ui:
         ui.begin("Contacts", "loading contact list…")
     recs = load_contacts(plain)
-    contact = None
-    if args.alias:
-        contact = find_by_alias(recs, args.alias)
-        if contact is None:
+    contacts: list = []
+    if args.all_contacts:
+        min_msgs = max(1, args.min_messages)
+        contacts = [r for r in recs if r.message_count >= min_msgs]
+        if ui:
+            ui.end("Contacts", f"--all-contacts: {len(contacts)} (≥ {min_msgs} msgs)")
+    elif args.alias:
+        aliases = [a.strip() for a in args.alias.split(",") if a.strip()]
+        missing: list[str] = []
+        for a in aliases:
+            c = find_by_alias(recs, a)
+            if c is None:
+                missing.append(a)
+            else:
+                contacts.append(c)
+        if missing:
             if ui:
-                ui.fail("Contacts", f"alias {args.alias!r} not found")
+                ui.fail("Contacts", f"alias(es) not found: {', '.join(missing)}")
                 ui.stop()
-            print(f"[!] alias {args.alias!r} not found")
-            hint = _suggest_alias(recs, args.alias)
-            if hint:
-                print(hint)
+            print(f"[!] alias(es) not found: {', '.join(repr(m) for m in missing)}")
+            for m in missing:
+                hint = _suggest_alias(recs, m)
+                if hint:
+                    print(f"  {m}:{hint}")
             return 2
+        if ui:
+            summary = ", ".join(f"{c.display_name} ({c.message_count:,})" for c in contacts)
+            ui.end("Contacts", summary[:80])
     else:
         if ui:
-            ui.stop()                     # pause UI for interactive picker
-        contact = pick(recs, Console())
-        if contact is None:
+            ui.stop()
+        choice = pick(recs, Console())
+        if choice is None:
             return 0
+        contacts = [choice]
         if ui:
             ui.start()
+            ui.end("Contacts", f"{choice.display_name} ({choice.alias or choice.username}) — {choice.message_count:,} msgs total")
+
+    # ── render each contact in sequence ────────────────────────────────────
+    rc_overall = 0
+    all_outputs: list[tuple[str, Path]] = []
+    all_msgs_sum = 0
+    all_recall_sum = 0
+    first_ts = None
+    last_ts = 0
+    summary_contact = contacts[0] if contacts else None
+    for i, contact in enumerate(contacts):
+        if ui and i > 0:
+            ui.begin("Extract", f"({i + 1}/{len(contacts)}) {contact.display_name}…")
+        rc, outs, msgs, recall_count = _render_single_contact(args, workspace, log, ui, contact, len(contacts))
+        if rc != 0:
+            rc_overall = rc
+        if msgs:
+            all_outputs.extend(outs)
+            all_msgs_sum += len(msgs)
+            all_recall_sum += recall_count
+            if first_ts is None or msgs[0].create_time < first_ts:
+                first_ts = msgs[0].create_time
+            if msgs[-1].create_time > last_ts:
+                last_ts = msgs[-1].create_time
+
+    if rc_overall == 0 and all_outputs and not getattr(args, "no_summary", False) and summary_contact:
+        # Use the first contact for the summary header when single; for many,
+        # emit a synthetic "N contacts" pseudo-record so the panel still renders.
+        if len(contacts) == 1:
+            sc = summary_contact
+        else:
+            sc = _make_aggregate_contact(contacts, len(all_outputs))
+        from datetime import datetime as _dt
+        first = _dt.fromtimestamp(first_ts) if first_ts else None
+        last = _dt.fromtimestamp(last_ts) if last_ts else None
+        _print_summary_with_range(sc, all_msgs_sum, all_recall_sum,
+                                  first, last, all_outputs, workspace, ui,
+                                  total_time=time.perf_counter() - t_start)
+    return rc_overall
+
+
+def _make_aggregate_contact(contacts, n_files):
+    """Build a ContactRecord-shaped stub so the summary header reads sanely
+    when multiple contacts were extracted in one run."""
+    from wxextract.contacts import ContactRecord
+    names = ", ".join(c.display_name for c in contacts[:4])
+    if len(contacts) > 4:
+        names += f", … +{len(contacts) - 4} more"
+    return ContactRecord(
+        username="",
+        alias=f"{len(contacts)} contacts",
+        nick_name="",
+        remark=f"{len(contacts)} contacts → {n_files} files: {names}",
+        local_type=1,
+    )
+
+
+def _render_single_contact(args, workspace, log, ui, contact, n_total):
+    """Run extract + render+chunk for one contact.
+    Returns (rc, [(fmt, Path), ...], msgs, recall_count)."""
+    from wxextract.messages import extract
     if ui:
-        ui.end("Contacts", f"{contact.display_name} ({contact.alias or contact.username}) — {contact.message_count:,} msgs total")
-        ui.begin("Extract", "walking message table…")
+        prefix = f"({contact.display_name}) " if n_total > 1 else ""
+        ui.begin("Extract", prefix + "walking message table…")
     my_wxid = _detect_my_wxid(workspace) or "wxid_unknown"
     skip = args.skip_recalls and not args.include_recalls
-    # always read with skip=False so we can report the recall count, then filter
     msgs_all = list(extract(contact, my_wxid=my_wxid, skip_recalls=False))
-    if skip:
-        msgs = [m for m in msgs_all if not _is_recall_msg(m)]
-    else:
-        msgs = msgs_all
+    msgs = [m for m in msgs_all if not _is_recall_msg(m)] if skip else msgs_all
     recall_count = len(msgs_all) - len(msgs)
 
     # ── --since-last: filter to messages newer than the saved baseline ────────
@@ -740,29 +822,27 @@ def _cmd_render(args, workspace: Path, log, ui=None) -> int:
             log.info("--since-last: no prior baseline for this alias — emitting full export and seeding state")
             since_suffix = "_baseline"
 
-    log.info(f"extracted {len(msgs)} messages")
+    log.info(f"extracted {len(msgs)} messages for {contact.alias or contact.username}")
     if ui:
         d = f"{len(msgs):,} messages"
         if recall_count:
             d += f"  ({recall_count} recalls filtered)"
         if since_last:
             d += "  (incremental)"
+        if n_total > 1:
+            d = f"{contact.display_name}: " + d
         ui.end("Extract", d)
 
-    # nothing new → exit cleanly without writing files
+    # nothing new → exit cleanly without writing files for this contact
     if since_last and not msgs:
-        if ui:
-            ui.skip("Render", "nothing new since last run")
-            ui.skip("Chunk", "")
-            ui.stop()
-        print("Nothing new since the last run for", contact.alias or contact.username)
-        # still update the state's last_run_at timestamp (useful for "I checked at …" reporting)
+        if n_total == 1:
+            print(f"Nothing new since the last run for {contact.alias or contact.username}")
         if msgs_all:
             last = msgs_all[-1]
             from wxextract import state as _state
             _state.save(workspace, contact.alias, username=contact.username,
                         last_local_id=last.local_id, last_create_time=last.create_time)
-        return 0
+        return 0, [], [], recall_count
 
     out_dir = (Path(args.out_dir).expanduser().resolve()
                if getattr(args, "out_dir", None) else workspace / "output")
@@ -770,16 +850,44 @@ def _cmd_render(args, workspace: Path, log, ui=None) -> int:
         args, msgs, contact, my_wxid, out_dir, ui=ui,
         name_suffix=since_suffix,
     )
-    if rc == 0:
-        # update state baseline to the LAST message we just emitted
-        if msgs:
-            last = msgs[-1]
-            from wxextract import state as _state
-            _state.save(workspace, contact.alias, username=contact.username,
-                        last_local_id=last.local_id, last_create_time=last.create_time)
-        if outputs and not getattr(args, "no_summary", False):
-            _print_summary(contact, msgs, recall_count, outputs, workspace, ui)
-    return rc
+    if rc == 0 and msgs:
+        last = msgs[-1]
+        from wxextract import state as _state
+        _state.save(workspace, contact.alias, username=contact.username,
+                    last_local_id=last.local_id, last_create_time=last.create_time)
+    return rc, outputs, msgs, recall_count
+
+
+def _print_summary_with_range(contact, message_count, recall_count, first_dt, last_dt,
+                              outputs, workspace, ui, total_time: float = 0.0):
+    """Final summary panel given an aggregate contact + already-computed range."""
+    import shutil as _sh
+
+    from rich.console import Console
+
+    from wxextract.progress import file_stats, render_summary
+    if ui:
+        ui.stop()
+    if not outputs:
+        return
+    stats = [file_stats(p, fmt) for fmt, p in outputs]
+    total_days = ((last_dt.date() - first_dt.date()).days + 1) if (first_dt and last_dt) else 0
+    # prefer the explicit total_time (full run wall-clock); fall back to ui.t0
+    if total_time == 0.0 and ui:
+        total_time = time.perf_counter() - ui.t0
+    width = _sh.get_terminal_size((140, 24)).columns
+    render_summary(
+        Console(width=max(width, 120)),
+        contact=contact,
+        message_count=message_count,
+        recall_count=recall_count,
+        date_range=(first_dt.date().isoformat() if first_dt else "?",
+                    last_dt.date().isoformat() if last_dt else "?"),
+        total_days=total_days,
+        total_time=total_time,
+        outputs=stats,
+        workspace=workspace,
+    )
 
 
 def _is_recall_msg(m) -> bool:
