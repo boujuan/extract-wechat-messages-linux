@@ -11,14 +11,48 @@ Produces three output formats:
 | `pseudo-xml` | Structured Claude prompts             | ~16% smaller, well-formed XML             |
 | `jsonl`      | RAG ingestion, search, analytics      | Full fidelity (per-message records)       |
 
-## Quickstart
+## Install
+
+**Recommended — install globally so `wxextract` is on your PATH:**
+
+```sh
+uv tool install git+https://github.com/boujuan/extract-wechat-messages-linux
+```
+
+(or from a local clone: `uv tool install /path/to/extract-wechat-messages-linux`).
+
+`uv` puts the executable at `~/.local/bin/wxextract` and isolates the deps
+in their own venv. Update later with `uv tool upgrade wxextract`,
+uninstall with `uv tool uninstall wxextract`.
+
+**Alternatives**:
+
+```sh
+pipx install git+https://github.com/boujuan/extract-wechat-messages-linux
+# or
+pip install --user git+https://github.com/boujuan/extract-wechat-messages-linux
+```
+
+**For development** (editable install with the test suite):
 
 ```sh
 git clone https://github.com/boujuan/extract-wechat-messages-linux
 cd extract-wechat-messages-linux
-uv sync                                                  # one-shot setup
-uv run wxextract                                         # interactive: auto-discover → snapshot → pick contact → render
-uv run wxextract --alias <wechat_id> --format txt-b --chunk month
+uv sync                                          # creates .venv, installs editable + dev deps
+uv run pytest                                    # run tests
+uv run wxextract --help                          # run the CLI
+```
+
+When installed globally, the workspace defaults to
+`~/.local/share/wxextract/` (XDG-compliant). When running from a source
+checkout (the dev flow above), it defaults to `<project>/workspace/`.
+Override either with `--workspace PATH` or `WXE_WORKSPACE=…`.
+
+## Quickstart
+
+```sh
+wxextract                                        # interactive: auto-discover → snapshot → pick contact → render
+wxextract --alias <wechat_id> --format txt-b --chunk month
 ```
 
 (`--alias`, `--format`, etc. work with or without the explicit `run`
