@@ -64,6 +64,10 @@ def _add_common_render_args(sp, *, include_pipeline: bool = False):
                        help="WeChat ID of the contact to extract (skips the interactive picker).")
     g_sel.add_argument("--include-recalls", action="store_true",
                        help="Keep \"X recalled a message\" notifications (default: filter them out).")
+    g_sel.add_argument("--since-last", action="store_true",
+                       help="Only render messages newer than the previous run for this alias. "
+                            "Reads/writes workspace/last_extract.json. Output filename gets an "
+                            "_inc_<timestamp> suffix; if no new messages, exits cleanly with no file.")
     sp.set_defaults(skip_recalls=True)
 
     g_out = sp.add_argument_group("Output format")
@@ -212,7 +216,8 @@ def _inject_default_subcommand(argv: list[str]) -> list[str]:
     that belongs to `run`/`render`. Top-level flags (`--workspace`, `--account-dir`,
     `-v`, `-q`) are passed through unchanged.
     """
-    top_level = {"--workspace", "--account-dir", "-v", "--verbose", "-q", "--quiet"}
+    top_level = {"--workspace", "--account-dir", "-v", "--verbose", "-q", "--quiet",
+                 "--no-progress", "--no-summary"}
     top_level_takes_arg = {"--workspace", "--account-dir"}
     subs = {"status", "list", "resnap", "run", "render", "preview"}
     i = 0
@@ -717,17 +722,62 @@ def _cmd_render(args, workspace: Path, log, ui=None) -> int:
     else:
         msgs = msgs_all
     recall_count = len(msgs_all) - len(msgs)
+
+    # ── --since-last: filter to messages newer than the saved baseline ────────
+    since_last = getattr(args, "since_last", False)
+    since_suffix = ""
+    if since_last:
+        from wxextract import state as _state
+        prior = _state.get(workspace, contact.alias) if contact.alias else None
+        if prior:
+            threshold = int(prior.get("last_local_id", 0))
+            before_n = len(msgs)
+            msgs = [m for m in msgs if m.local_id > threshold]
+            log.info(f"--since-last: dropped {before_n - len(msgs)} msgs at or below local_id={threshold}")
+            since_suffix = f"_inc_{int(time.time())}"
+        else:
+            log.info("--since-last: no prior baseline for this alias — emitting full export and seeding state")
+            since_suffix = "_baseline"
+
     log.info(f"extracted {len(msgs)} messages")
     if ui:
         d = f"{len(msgs):,} messages"
         if recall_count:
             d += f"  ({recall_count} recalls filtered)"
+        if since_last:
+            d += "  (incremental)"
         ui.end("Extract", d)
+
+    # nothing new → exit cleanly without writing files
+    if since_last and not msgs:
+        if ui:
+            ui.skip("Render", "nothing new since last run")
+            ui.skip("Chunk", "")
+            ui.stop()
+        print("Nothing new since the last run for", contact.alias or contact.username)
+        # still update the state's last_run_at timestamp (useful for "I checked at …" reporting)
+        if msgs_all:
+            last = msgs_all[-1]
+            from wxextract import state as _state
+            _state.save(workspace, contact.alias, username=contact.username,
+                        last_local_id=last.local_id, last_create_time=last.create_time)
+        return 0
+
     out_dir = (Path(args.out_dir).expanduser().resolve()
                if getattr(args, "out_dir", None) else workspace / "output")
-    rc, outputs = _render_and_chunk(args, msgs, contact, my_wxid, out_dir, ui=ui)
-    if rc == 0 and outputs and not getattr(args, "no_summary", False):
-        _print_summary(contact, msgs, recall_count, outputs, workspace, ui)
+    rc, outputs = _render_and_chunk(
+        args, msgs, contact, my_wxid, out_dir, ui=ui,
+        name_suffix=since_suffix,
+    )
+    if rc == 0:
+        # update state baseline to the LAST message we just emitted
+        if msgs:
+            last = msgs[-1]
+            from wxextract import state as _state
+            _state.save(workspace, contact.alias, username=contact.username,
+                        last_local_id=last.local_id, last_create_time=last.create_time)
+        if outputs and not getattr(args, "no_summary", False):
+            _print_summary(contact, msgs, recall_count, outputs, workspace, ui)
     return rc
 
 
@@ -808,12 +858,12 @@ def _detect_my_wxid(workspace: Path) -> str | None:
 
 
 def _render_and_chunk(args, msgs, contact, my_wxid: str, out_dir: Path,
-                      ui=None) -> tuple[int, list[tuple[str, Path]]]:
+                      ui=None, name_suffix: str = "") -> tuple[int, list[tuple[str, Path]]]:
     """Render every requested format (+chunk). Returns (exit_code, [(fmt, path)])."""
     from wxextract.chunker import chunk_by_tokens, chunk_calendar
     from wxextract.render import compact_txt, jsonl, pseudo_xml
     formats = [f.strip() for f in args.format.split(",") if f.strip()]
-    base_name = contact.alias or contact.username
+    base_name = (contact.alias or contact.username) + name_suffix
     render_map = {
         "txt-b": (compact_txt, "txt"),
         "jsonl": (jsonl, "jsonl"),
