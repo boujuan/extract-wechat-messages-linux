@@ -12,10 +12,9 @@ Filename convention:
 """
 from __future__ import annotations
 
-import re
-from datetime import date, datetime
+from collections.abc import Callable
+from datetime import date
 from pathlib import Path
-from typing import Callable, Iterable
 
 from wxextract.contacts import ContactRecord
 from wxextract.messages import Message
@@ -128,7 +127,6 @@ def _split_xml_into_header_and_sessions(text: str) -> tuple[str, list[str], str]
     # split bodies into chunks; a chunk = optional leading <gap.../> + one <session>...</session>
     sessions: list[str] = []
     buf: list[str] = []
-    i = 0
     lines = body.splitlines(keepends=True)
     pending_gap: list[str] = []
     for ln in lines:

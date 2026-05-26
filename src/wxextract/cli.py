@@ -255,6 +255,7 @@ def main(argv: list[str] | None = None) -> int:
     ui = None
     if use_progress:
         from rich.console import Console
+
         from wxextract.progress import ProgressUI
         ui = ProgressUI(console=Console(stderr=True), enabled=True)
         ui.start()
@@ -372,17 +373,8 @@ def _content_stats(db_storage: Path, keys_by_rel: dict[str, str]) -> dict[str, i
         p = db_storage / rel
         if not p.is_file():
             continue
-        sql = (
-            f"PRAGMA key = \"x'{key_hex}'\";\n"
-            "PRAGMA cipher_compatibility = 4;\n"
-            "SELECT COALESCE(SUM(cnt), 0) FROM (\n"
-            "  SELECT (SELECT COUNT(*) FROM pragma_table_info(name)) AS _,"
-            "         (SELECT COUNT(*) FROM (SELECT 1 FROM \"' || name || '\")) AS cnt"
-            "  FROM sqlite_master WHERE type='table' AND name LIKE 'Msg_%'\n"
-            ");\n"
-        )
-        # The dynamic-name COUNT(*) above is tricky to do portably; fall back to
-        # listing tables then COUNT(*)-per-table in Python.
+        # SQLite doesn't support a generic per-table COUNT in one SELECT, so list the
+        # Msg_* tables first then sum COUNT(*) across them in a follow-up query.
         list_sql = (
             f"PRAGMA key = \"x'{key_hex}'\";\n"
             "PRAGMA cipher_compatibility = 4;\n"
@@ -490,10 +482,11 @@ def _cached_keys_still_valid(keys_path: Path, db_storage: Path) -> dict[str, str
 
 def _cmd_resnap(workspace: Path, force: bool = False, no_relaunch: bool = False,
                 account_dir: Path | None = None, ui=None) -> int:
+    import logging
+
     from wxextract import discover, lifecycle, snapshot
     from wxextract.decrypt import decrypt_all
     from wxextract.keys import collect_dbs, load_keys, save_keys, scan
-    import logging
     log = logging.getLogger("wxextract")
     if ui:
         ui.begin("Discover")
@@ -897,7 +890,9 @@ def _print_summary(contact, msgs, recall_count, outputs, workspace, ui):
     """Compute per-file stats and print the final summary panel."""
     import shutil as _sh
     from datetime import datetime
+
     from rich.console import Console
+
     from wxextract.progress import file_stats, render_summary
 
     if ui:

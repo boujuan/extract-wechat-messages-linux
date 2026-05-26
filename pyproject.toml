@@ -35,3 +35,22 @@ package = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+
+[tool.ruff.lint]
+select = [
+    "E", "F", "W",   # pyflakes + pycodestyle
+    "I",             # isort
+    "B",             # bugbear
+    "UP",            # pyupgrade
+]
+ignore = [
+    "E501",          # line too long — let formatter handle
+    "B008",          # function calls in defaults (rich.Text() used in tables)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["F401", "F811"]   # test fixtures import patterns

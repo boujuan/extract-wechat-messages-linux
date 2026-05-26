@@ -17,7 +17,6 @@ import contextlib
 import re
 import time
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 
 from rich.box import ROUNDED
@@ -27,7 +26,6 @@ from rich.panel import Panel
 from rich.spinner import Spinner
 from rich.table import Table
 from rich.text import Text
-
 
 STAGE_ORDER = [
     "Discover",
@@ -276,8 +274,10 @@ def render_summary(
                 f"{o['tokens']:,}",
                 f"{o['days']}" if o["days"] else "—",
             )
-            sz_tot += o["size"]; ln_tot += o["lines"]
-            wd_tot += o["words"]; tk_tot += o["tokens"]
+            sz_tot += o["size"]
+            ln_tot += o["lines"]
+            wd_tot += o["words"]
+            tk_tot += o["tokens"]
             days_tot += o["days"]
         if len(outputs) > 1:
             t.add_section()

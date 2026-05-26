@@ -1,5 +1,5 @@
-from wxextract.cli import build_parser
 from wxextract import __version__
+from wxextract.cli import build_parser
 
 
 def test_version_is_set():

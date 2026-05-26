@@ -13,7 +13,7 @@ import tiktoken
 
 
 @functools.lru_cache(maxsize=1)
-def _encoder() -> "tiktoken.Encoding":
+def _encoder() -> tiktoken.Encoding:
     return tiktoken.get_encoding("cl100k_base")
 
 

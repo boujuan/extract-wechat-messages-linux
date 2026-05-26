@@ -38,7 +38,6 @@ from wxextract.render.common import (
 from wxextract.tokens import count as count_tokens
 from wxextract.tokens import fmt_short
 
-
 REPLY_PREVIEW_MAX = 40
 
 

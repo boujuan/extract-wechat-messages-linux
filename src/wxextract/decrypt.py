@@ -18,16 +18,13 @@ import sqlite3
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
 
 from Crypto.Cipher import AES
 
 from wxextract.keys import (
-    HMAC_SZ,
     PAGE_SZ,
     RESERVE_SZ,
     SALT_SZ,
-    derive_mac_key,
 )
 
 log = logging.getLogger("wxextract.decrypt")

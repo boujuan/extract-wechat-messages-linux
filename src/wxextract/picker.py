@@ -5,10 +5,8 @@ typing a substring filter.
 """
 from __future__ import annotations
 
-import hashlib
 import sqlite3
 from datetime import datetime
-from pathlib import Path
 
 import zstandard as zstd
 from rich.console import Console
@@ -16,7 +14,6 @@ from rich.prompt import Prompt
 from rich.table import Table
 
 from wxextract.contacts import ContactRecord
-
 
 _ZSTD = zstd.ZstdDecompressor()
 

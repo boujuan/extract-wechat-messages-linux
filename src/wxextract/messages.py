@@ -19,9 +19,9 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator
 
 import zstandard as zstd
 

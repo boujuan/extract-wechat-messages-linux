@@ -7,7 +7,6 @@ stale. We pick whichever location has the most recently modified message DB.
 """
 from __future__ import annotations
 
-import os
 import shutil
 import subprocess
 from dataclasses import dataclass

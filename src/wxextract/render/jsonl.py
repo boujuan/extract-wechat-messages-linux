@@ -9,7 +9,6 @@ import json
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable
 
 from wxextract.contacts import ContactRecord
 from wxextract.messages import Message

@@ -34,7 +34,6 @@ import re
 import stat
 import struct
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 

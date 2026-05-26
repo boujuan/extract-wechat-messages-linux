@@ -15,7 +15,6 @@ from wxextract.keys import (
     verify_enc_key,
 )
 
-
 # ── pure-crypto unit tests ────────────────────────────────────────────────────
 
 

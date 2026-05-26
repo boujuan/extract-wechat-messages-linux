@@ -25,7 +25,7 @@ Quoted replies inline:
 from __future__ import annotations
 
 import io
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
 from wxextract.contacts import ContactRecord

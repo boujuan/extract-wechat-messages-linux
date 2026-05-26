@@ -10,8 +10,8 @@ from __future__ import annotations
 
 import re
 import xml.etree.ElementTree as ET
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
-from typing import Iterable, Iterator
 
 from wxextract.contacts import ContactRecord
 from wxextract.messages import (
@@ -30,7 +30,6 @@ from wxextract.messages import (
     TYPE_VOICE,
     Message,
 )
-
 
 # ---------------------------------------------------------------------------
 # Body extraction — produce a renderer-agnostic structured representation
