@@ -13,40 +13,55 @@ Produces three output formats:
 
 ## Install
 
-**Recommended — install globally so `wxextract` is on your PATH:**
+**One command** (recommended — installs globally, isolated venv, on PATH):
 
 ```sh
 uv tool install git+https://github.com/boujuan/extract-wechat-messages-linux
 ```
 
-(or from a local clone: `uv tool install /path/to/extract-wechat-messages-linux`).
-
-`uv` puts the executable at `~/.local/bin/wxextract` and isolates the deps
-in their own venv. Update later with `uv tool upgrade wxextract`,
-uninstall with `uv tool uninstall wxextract`.
-
-**Alternatives**:
+That's it. `wxextract` is now at `~/.local/bin/wxextract` (already on PATH for
+most shells). Verify:
 
 ```sh
-pipx install git+https://github.com/boujuan/extract-wechat-messages-linux
-# or
-pip install --user git+https://github.com/boujuan/extract-wechat-messages-linux
+wxextract --version       # → wxextract 0.1.0
+wxextract --help          # colorized help with grouped flags + examples
+wxextract status          # what's discovered + where the workspace lives
 ```
 
-**For development** (editable install with the test suite):
+### Updating
+
+`uv tool` does **not** auto-update. To pull the latest from GitHub:
+
+```sh
+uv tool upgrade wxextract
+```
+
+If you have a local checkout you want to install instead of the git
+URL, use `uv tool install --force /path/to/clone` (a re-install snapshot
+of the current code; not auto-tracking).
+
+### Uninstall
+
+```sh
+uv tool uninstall wxextract
+```
+
+### Alternative installers
+
+```sh
+pipx install git+https://github.com/boujuan/extract-wechat-messages-linux       # pipx
+pip install --user git+https://github.com/boujuan/extract-wechat-messages-linux # pip
+```
+
+### For development (editable install + tests)
 
 ```sh
 git clone https://github.com/boujuan/extract-wechat-messages-linux
 cd extract-wechat-messages-linux
 uv sync                                          # creates .venv, installs editable + dev deps
-uv run pytest                                    # run tests
-uv run wxextract --help                          # run the CLI
+uv run pytest                                    # run tests (28 always pass + 28 opt-in)
+uv run wxextract --help
 ```
-
-When installed globally, the workspace defaults to
-`~/.local/share/wxextract/` (XDG-compliant). When running from a source
-checkout (the dev flow above), it defaults to `<project>/workspace/`.
-Override either with `--workspace PATH` or `WXE_WORKSPACE=…`.
 
 ## Quickstart
 
@@ -142,8 +157,9 @@ wxextract run                                 # everything end-to-end (default)
 Synthetic example (no real chats):
 
 ```
-G:U=Me|A=Alice
-META:alice_42|range=2026-01-01..2026-01-15|msgs=312|tokens=~9.4k
+META: contact=alice_42 | range=2026-01-01..2026-01-15 | msgs=312 | tokens=~9.4k
+GLOSS: U=Me  A=Alice
+LEGEND: Chronological 1-on-1 chat. Lines: "<sender> <time> <body>". Time shrinks within a session: H:M:S (first) → :M:S (same hour) → :S (same min). ";" joins same-sender messages within 60s. "[↩X H:M \"…\"]" = reply to sender X with preview. "=YYYY-MM-DD" = new day. "=H:M +Nh" = mid-day gap resume. Media placeholders: [img] [voice Ns] [video Ns] [sticker] [call Nm] [file:name] [link:title] [sys:…]. [Word]-style tags like [Chuckle] are WeChat built-in stickers (mapped to Unicode emoji where possible).
 
 =2026-01-01
 A 10:29:01 hi there
@@ -153,16 +169,49 @@ U 11:00:10 pretty good;[image]
 
 =15:11 +4h
 U 15:11:32 you around tonight?
-A 15:13:11 yeah for sure
+A 15:13:11 yeah for sure 😄
 ```
 
-- `G:` glossary maps short letters (`U`, `A`, `B`, …) to display names.
-- `META:` carries the contact alias, date range, message count, token estimate.
+Every output file (and every chunk) opens with the same three header
+lines — so each chunk is self-contained as LLM context:
+
+- **`META:`** carries contact / date range / message count / token estimate.
+- **`GLOSS:`** maps short identifiers (`U`, `A`, `B`, …) → display names.
+- **`LEGEND:`** explains the format conventions in one line, so any LLM
+  consuming the file can interpret it without guessing.
+
+Body conventions:
+
 - `=YYYY-MM-DD` starts a new day; `=HH:MM +Nh` marks a mid-day silence gap.
-- Times shrink as the session goes on (`:35:40` = same hour as previous,
-  `:40` = same minute).
+- Times shrink within a session: `H:M:S` (first) → `:M:S` (same hour) → `:S` (same min).
 - Same-sender messages within 60 s are joined by `;`.
-- Quoted replies inline as `[↩U 22:48 "preview"]`.
+- Quoted replies inline as `[↩U 22:48 "preview"]` (preview is configurable
+  via `--reply-preview {full|short|none}`).
+- WeChat stickers (`[Chuckle]`, `[Facepalm]`, ...) map to Unicode emoji
+  when `--sticker-emojis` is passed.
+
+## Live progress UI & summary
+
+When you run `wxextract` (or `run` / `render` / `resnap`), the tool shows a
+live status panel powered by `rich.Live`, with a spinner on the in-flight
+stage and elapsed time per completed stage:
+
+```
+╭───────────── wxextract  · 4.2s ─────────────╮
+│  ✓  Discover  54 ms     install=aur  …      │
+│  ✓  Keys  330 ms        19 cached keys ✓    │
+│  ⊘  Snapshot            fresh — no changes  │
+│  ⊘  Decrypt             fresh — no changes  │
+│  ✓  Contacts  786 ms    🐑Rachel — 11,948 …│
+│  ✓  Extract  84 ms      11,903 messages     │
+│  ⠹  Render              writing xml…        │
+│  ·  Chunk                                   │
+╰─────────────────────────────────────────────╯
+```
+
+When it finishes, a summary panel prints to stdout with per-file
+size / lines / words / tokens / days plus a TOTAL row. Disable with
+`--no-progress` / `--no-summary`. Use `-v` for plain log lines instead.
 
 ## How it works
 
@@ -212,17 +261,28 @@ compression ratio ≥ 30%, chunker integrity, emoji-squash and redact regexes.
 
 ## Output locations
 
-Everything lands under `<project-root>/workspace/` by default:
+The workspace directory holds everything wxextract produces:
 
 ```
 workspace/
-├── all_keys.json   (chmod 600 — the recovered SQLCipher keys; treat as sensitive)
-├── snapshot/       (rsync mirror of the encrypted DB tree)
-├── plain_dbs/      (decrypted SQLite, queryable with any client)
-└── output/         (your rendered conversations)
+├── all_keys.json         (chmod 600 — recovered SQLCipher keys; treat as sensitive)
+├── snapshot_stats.json   (per-shard row counts; drift detection baseline)
+├── snapshot/             (rsync mirror of the encrypted DB tree)
+├── plain_dbs/            (decrypted SQLite, queryable with any sqlite3 client)
+└── output/               (your rendered conversations — .txt / .xml / .jsonl)
 ```
 
-Override with `--workspace PATH` or `WXE_WORKSPACE=…`.
+The workspace location depends on how wxextract was invoked:
+
+| Situation | Workspace path |
+|---|---|
+| `--workspace PATH` or `WXE_WORKSPACE=…` | That path |
+| Installed via `uv tool` / `pipx` / `pip --user` (recommended) | `~/.local/share/wxextract/` (XDG-compliant via `$XDG_DATA_HOME`) |
+| Running from a source checkout via `uv run …` | `<project>/workspace/` |
+
+To send rendered files somewhere outside the workspace (e.g. a synced
+folder), use `--out-dir PATH`. That overrides only `output/`; everything
+else stays in the workspace.
 
 ## Limitations
 
