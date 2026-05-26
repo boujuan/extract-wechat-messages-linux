@@ -53,3 +53,34 @@ def test_squash_and_redact_flags():
 def test_chunk_token_format():
     args = _parse(["--alias", "x", "--chunk", "tokens:5000"])
     assert args.chunk == "tokens:5000"
+
+
+def test_bare_invocation_dispatches_to_run():
+    """`wxextract` with no args at all defaults to `run`."""
+    args = _parse([])
+    assert args.command == "run"
+    assert args.alias is None
+    assert args.all_contacts is False
+
+
+def test_top_level_only_flag_defaults_to_run():
+    """Regression: `wxextract -v` used to crash with AttributeError."""
+    args = _parse(["-v"])
+    assert args.command == "run"
+    assert args.verbose is True
+    # all the run-specific defaults must be available so _cmd_render doesn't AttributeError
+    assert args.alias is None
+    assert args.format == "txt-b,jsonl,xml"
+    assert args.all_contacts is False
+
+
+def test_quiet_only_defaults_to_run():
+    args = _parse(["-q"])
+    assert args.command == "run"
+    assert args.quiet is True
+
+
+def test_workspace_only_defaults_to_run():
+    args = _parse(["--workspace", "/tmp/x"])
+    assert args.command == "run"
+    assert args.workspace == "/tmp/x"

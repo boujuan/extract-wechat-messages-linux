@@ -51,8 +51,21 @@ _EPILOG = (
     "[dim]contacts table[/]\n"
     "  [cyan]wxextract status[/]                                        "
     "[dim]install info + cache state[/]\n"
+    "  [cyan]wxextract stats --alias X[/]                               "
+    "[dim]per-contact analytics[/]\n"
+    "  [cyan]wxextract images --alias X[/]                              "
+    "[dim]decrypt .dat image attachments[/]\n"
     "  [cyan]wxextract resnap --no-relaunch[/]                          "
     "[dim]refresh data, keep WeChat closed[/]\n\n"
+    "[bold yellow]Updating[/]\n"
+    "  [cyan]uv tool upgrade wxextract[/]                               "
+    "[dim]pull the latest release from GitHub (uv installs)[/]\n"
+    "  [cyan]pipx upgrade wxextract[/]                                  "
+    "[dim](pipx installs)[/]\n"
+    "  [dim]The tool also auto-checks the GitHub releases API once per day "
+    "and prints a short notice when a newer version is out. "
+    "Disable with [/][cyan]--no-update-check[/][dim] or [/]"
+    "[cyan]WXE_NO_UPDATE_CHECK=1[/][dim].[/]\n\n"
     "[dim]Docs: https://github.com/boujuan/extract-wechat-messages-linux[/]"
 )
 
@@ -153,6 +166,9 @@ def build_parser() -> argparse.ArgumentParser:
                              help="Disable the live progress UI (plain log lines instead).")
     g_verbosity.add_argument("--no-summary", action="store_true",
                              help="Skip the final summary panel.")
+    g_verbosity.add_argument("--no-update-check", action="store_true",
+                             help="Skip the once-per-day GitHub release check "
+                                  "(can also set WXE_NO_UPDATE_CHECK=1).")
 
     # ── subcommands ───────────────────────────────────────────────────────────
     sub = p.add_subparsers(
@@ -246,16 +262,15 @@ _RUN_FLAGS = {
 
 
 def _inject_default_subcommand(argv: list[str]) -> list[str]:
-    """If user types `wxextract --alias X ...` with no subcommand, treat it as `run`.
-
-    Detect by scanning until we hit either a known subcommand or a `--`-flag
-    that belongs to `run`/`render`. Top-level flags (`--workspace`, `--account-dir`,
-    `-v`, `-q`) are passed through unchanged.
+    """If user types `wxextract --alias X ...` (or bare `wxextract`) with no
+    explicit subcommand, inject `run`. Top-level flags (`--workspace`,
+    `-v`, `-q`, etc.) pass through unchanged; the `run` lands after them
+    but before any run-specific flags.
     """
     top_level = {"--workspace", "--account-dir", "-v", "--verbose", "-q", "--quiet",
-                 "--no-progress", "--no-summary"}
+                 "--no-progress", "--no-summary", "--no-update-check"}
     top_level_takes_arg = {"--workspace", "--account-dir"}
-    subs = {"status", "list", "resnap", "run", "render", "preview"}
+    subs = {"status", "list", "resnap", "run", "render", "preview", "stats", "images"}
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -268,7 +283,7 @@ def _inject_default_subcommand(argv: list[str]) -> list[str]:
             i += 1
             continue
         if a.startswith("-"):
-            # any other flag → must be a run/render flag; inject `run`
+            # any other flag → must be a run/render flag; inject `run` before it
             head = argv[:i]
             tail = argv[i:]
             if any(t.split("=", 1)[0] in _RUN_FLAGS for t in tail):
@@ -276,7 +291,8 @@ def _inject_default_subcommand(argv: list[str]) -> list[str]:
             return argv
         # bare positional with no subcommand — let argparse complain
         return argv
-    return argv
+    # walked the whole argv with only top-level flags (or none): default to `run`
+    return argv + ["run"]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -291,6 +307,17 @@ def main(argv: list[str] | None = None) -> int:
     workspace = (Path(args.workspace).expanduser().resolve()
                  if args.workspace else default_workspace())
     cmd = args.command or "run"
+
+    # Non-blocking GitHub release check (≤ once per 24h, cached).
+    # Print the notice to stderr at the very end of the run instead of here,
+    # so it doesn't get swallowed by the live progress UI.
+    update_tag: str | None = None
+    if not args.no_update_check and cmd in ("run", "render", "resnap"):
+        try:
+            from wxextract import update_check
+            update_tag = update_check.check()
+        except Exception:
+            update_tag = None
 
     use_progress = not args.verbose and not args.no_progress and cmd in ("run", "render", "resnap")
     ui = None
@@ -324,6 +351,9 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         if ui is not None:
             ui.stop()
+        if update_tag:
+            from wxextract import update_check
+            print(update_check.notice(update_tag), file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------
@@ -732,12 +762,12 @@ def _cmd_render(args, workspace: Path, log, ui=None) -> int:
         ui.begin("Contacts", "loading contact list…")
     recs = load_contacts(plain)
     contacts: list = []
-    if args.all_contacts:
-        min_msgs = max(1, args.min_messages)
+    if getattr(args, "all_contacts", False):
+        min_msgs = max(1, getattr(args, "min_messages", 1))
         contacts = [r for r in recs if r.message_count >= min_msgs]
         if ui:
             ui.end("Contacts", f"--all-contacts: {len(contacts)} (≥ {min_msgs} msgs)")
-    elif args.alias:
+    elif getattr(args, "alias", None):
         aliases = [a.strip() for a in args.alias.split(",") if a.strip()]
         missing: list[str] = []
         for a in aliases:
