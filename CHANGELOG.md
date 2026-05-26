@@ -6,6 +6,42 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-05-26
+
+`wxextract render` now accepts WhatsApp JSON files — TXT-B,
+pseudo-XML, Markdown, and JSONL all use the same renderers and
+chunker as the WeChat side.
+
+### Added
+
+- **`wxextract render --whatsapp-json PATH`** (repeatable) — render
+  a WhatsApp conversation (JSON produced by
+  `Parse_Whatsapp_LLM --format wxextract`) through the existing
+  TXT-B / XML / MD / JSONL pipeline, with the same compression
+  flags (`--time-precision`, `--sticker-emojis`,
+  `--reply-preview`, `--squash-emoji`, `--redact`) and chunking
+  options (`--chunk month/week/day/tokens:N`) you already use for
+  WeChat. Can be combined with `--alias` to render both sources in
+  one run, or use `--whatsapp-only` to skip WeChat data entirely.
+- **`TYPE_MEDIA_GENERIC` placeholder** properly handled in
+  `render.common.body_of` — WhatsApp `<Media omitted>` now renders
+  as `[media]` (consistent with WeChat's `[img]` / `[voice]` /
+  `[video]` placeholders) instead of the raw `[type:1001/0]`
+  fallback.
+
+### Internal
+
+- `_render_single_contact` gains an optional `preloaded_msgs` arg
+  so the WhatsApp path can skip the extract() step and feed the
+  loaded messages straight into `_render_and_chunk`.
+- `_cmd_render` reshaped to iterate over `(contact, msgs|None)`
+  tuples — WeChat contacts get `None` (extract on demand);
+  WhatsApp pairs come pre-loaded. Path through the renderers +
+  summary is otherwise identical.
+
+[Unreleased]: https://github.com/boujuan/extract-wechat-messages-linux/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/boujuan/extract-wechat-messages-linux/releases/tag/v0.7.0
+
 ## [0.6.0] - 2026-05-26
 
 Trend plots over time + daily timeline metric toggle + overview
@@ -45,7 +81,6 @@ double-counting fix.
   parameter so the caller can pass a deduped subset for the
   cross-contact aggregate when merges are active.
 
-[Unreleased]: https://github.com/boujuan/extract-wechat-messages-linux/compare/v0.6.0...HEAD
 [0.6.0]: https://github.com/boujuan/extract-wechat-messages-linux/releases/tag/v0.6.0
 
 ## [0.5.0] - 2026-05-26

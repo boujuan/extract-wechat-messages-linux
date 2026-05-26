@@ -88,6 +88,12 @@ def _add_common_render_args(sp, *, include_pipeline: bool = False):
                        help="Only render messages newer than the previous run for this alias. "
                             "Reads/writes workspace/last_extract.json. Output filename gets an "
                             "_inc_<timestamp> suffix; if no new messages, exits cleanly with no file.")
+    g_sel.add_argument("--whatsapp-json", action="append", default=[], metavar="PATH",
+                       help="Render a WhatsApp conversation (JSON produced by Parse_Whatsapp_LLM "
+                            "with --format wxextract). Repeatable. Each one gets its own output "
+                            "files alongside any --alias contacts.")
+    g_sel.add_argument("--whatsapp-only", action="store_true",
+                       help="Skip WeChat data entirely; only render the --whatsapp-json file(s).")
     sp.set_defaults(skip_recalls=True)
 
     g_out = sp.add_argument_group("Output format")
@@ -828,19 +834,52 @@ def _suggest_alias(recs, alias: str) -> str:
 
 
 def _cmd_render(args, workspace: Path, log, ui=None) -> int:
-    """Render one contact (or many via --alias=a,b or --all-contacts)."""
+    """Render one contact (or many via --alias=a,b or --all-contacts).
+
+    With --whatsapp-json PATH (repeatable), additionally renders each
+    WhatsApp JSON as if it were a contact — same formats (txt-b / xml /
+    md / jsonl), same chunker. Can be combined with --alias, or used
+    alone via --whatsapp-only (skips WeChat entirely).
+    """
+    from wxextract import whatsapp as _wa
     from wxextract.contacts import find_by_alias, load_contacts
     from wxextract.picker import pick
     t_start = time.perf_counter()
+    whatsapp_paths = list(getattr(args, "whatsapp_json", []) or [])
+    whatsapp_only = bool(getattr(args, "whatsapp_only", False))
+
     plain = workspace / "plain_dbs"
-    if not plain.is_dir():
-        print(f"[!] no plain_dbs at {plain}. Run `wxextract run` first.")
-        return 2
-    if ui:
-        ui.begin("Contacts", "loading contact list…")
-    recs = load_contacts(plain)
+    recs: list = []
     contacts: list = []
-    if getattr(args, "all_contacts", False):
+    if not whatsapp_only:
+        if not plain.is_dir():
+            print(f"[!] no plain_dbs at {plain}. "
+                  f"Run `wxextract run` first, or pass --whatsapp-only.")
+            return 2
+        if ui:
+            ui.begin("Contacts", "loading contact list…")
+        recs = load_contacts(plain)
+    # Pre-load WhatsApp pairs so we know how many "contacts" total we
+    # need to iterate through. These get merged into the contacts list
+    # but with a sentinel attribute so _render_single_contact knows to
+    # use the pre-loaded messages instead of extract()ing.
+    whatsapp_pairs: list[tuple] = []
+    for p in whatsapp_paths:
+        wp = Path(p).expanduser()
+        if not wp.is_file():
+            print(f"[!] WhatsApp JSON not found: {wp}")
+            return 2
+        try:
+            wa_contact, wa_msgs, _ = _wa.load_whatsapp_json(wp)
+        except (ValueError, KeyError, json.JSONDecodeError) as e:
+            print(f"[!] failed to load {wp}: {e}")
+            return 2
+        whatsapp_pairs.append((wa_contact, wa_msgs))
+    if whatsapp_only:
+        # No WeChat selection needed — WhatsApp pairs are already loaded.
+        if ui:
+            ui.end("Contacts", f"--whatsapp-only: {len(whatsapp_pairs)} JSON file(s)")
+    elif getattr(args, "all_contacts", False):
         min_msgs = max(1, getattr(args, "min_messages", 1))
         contacts = [r for r in recs if r.message_count >= min_msgs]
         if ui:
@@ -867,6 +906,11 @@ def _cmd_render(args, workspace: Path, log, ui=None) -> int:
         if ui:
             summary = ", ".join(f"{c.display_name} ({c.message_count:,})" for c in contacts)
             ui.end("Contacts", summary[:80])
+    elif whatsapp_pairs:
+        # --whatsapp-json was given without --alias — skip the picker
+        # and just render the WhatsApp pairs.
+        if ui:
+            ui.end("Contacts", f"{len(whatsapp_pairs)} WhatsApp JSON file(s)")
     else:
         if ui:
             ui.stop()
@@ -885,12 +929,20 @@ def _cmd_render(args, workspace: Path, log, ui=None) -> int:
     all_recall_sum = 0
     first_ts = None
     last_ts = 0
-    summary_contact = contacts[0] if contacts else None
+    # Build the iteration list: WeChat contacts (msgs=None → extract) then
+    # WhatsApp pairs (msgs pre-loaded → skip extract).
+    work: list[tuple] = [(c, None) for c in contacts] + whatsapp_pairs
+    if not work:
+        print("[!] nothing to render — no WeChat contacts selected and no --whatsapp-json given")
+        return 2
+    summary_contact = work[0][0] if work else None
     per_contact_msgs: list = []        # [(contact, msgs)] — kept for --stats
-    for i, contact in enumerate(contacts):
+    for i, (contact, preloaded) in enumerate(work):
         if ui and i > 0:
-            ui.begin("Extract", f"({i + 1}/{len(contacts)}) {contact.display_name}…")
-        rc, outs, msgs, recall_count = _render_single_contact(args, workspace, log, ui, contact, len(contacts))
+            ui.begin("Extract", f"({i + 1}/{len(work)}) {contact.display_name}…")
+        rc, outs, msgs, recall_count = _render_single_contact(
+            args, workspace, log, ui, contact, len(work),
+            preloaded_msgs=preloaded)
         if rc != 0:
             rc_overall = rc
         if msgs:
@@ -945,16 +997,29 @@ def _make_aggregate_contact(contacts, n_files):
     )
 
 
-def _render_single_contact(args, workspace, log, ui, contact, n_total):
+def _render_single_contact(args, workspace, log, ui, contact, n_total,
+                           preloaded_msgs=None):
     """Run extract + render+chunk for one contact.
-    Returns (rc, [(fmt, Path), ...], msgs, recall_count)."""
+
+    If `preloaded_msgs` is given (e.g. from a WhatsApp JSON), the
+    extract step is skipped and those messages are used directly.
+
+    Returns (rc, [(fmt, Path), ...], msgs, recall_count).
+    """
     from wxextract.messages import extract
     if ui:
         prefix = f"({contact.display_name}) " if n_total > 1 else ""
-        ui.begin("Extract", prefix + "walking message table…")
+        ui.begin("Extract", prefix + ("loading pre-parsed messages…"
+                                       if preloaded_msgs is not None
+                                       else "walking message table…"))
     my_wxid = _detect_my_wxid(workspace) or "wxid_unknown"
-    skip = args.skip_recalls and not args.include_recalls
-    msgs_all = list(extract(contact, my_wxid=my_wxid, skip_recalls=False))
+    if preloaded_msgs is not None:
+        msgs_all = list(preloaded_msgs)
+        skip = False    # recall semantics don't apply to WhatsApp; emitter
+                        # already skipped "You deleted this message".
+    else:
+        skip = args.skip_recalls and not args.include_recalls
+        msgs_all = list(extract(contact, my_wxid=my_wxid, skip_recalls=False))
     msgs = [m for m in msgs_all if not _is_recall_msg(m)] if skip else msgs_all
     recall_count = len(msgs_all) - len(msgs)
 

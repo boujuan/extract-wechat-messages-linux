@@ -23,6 +23,7 @@ from wxextract.messages import (
     TYPE_APPMSG,
     TYPE_CALL,
     TYPE_IMAGE,
+    TYPE_MEDIA_GENERIC,
     TYPE_STICKER,
     TYPE_SYSTEM,
     TYPE_TEXT,
@@ -342,6 +343,12 @@ def body_of(msg: Message, *, squash: bool = False, redact: bool = False,
         body = _call_body(msg.content)
     elif t == TYPE_SYSTEM:
         body = _system_body(msg.content)
+    elif t == TYPE_MEDIA_GENERIC:
+        # WhatsApp `<Media omitted>` — source can't disambiguate
+        # image / voice / video / sticker, so render as a generic
+        # [media] placeholder.
+        body = Body(text="[media]", kind="media",
+                    media={"type": t, "sub_type": sub})
     else:
         body = Body(text=f"[type:{t}/{sub}]", kind="unknown",
                     media={"type": t, "sub_type": sub})
