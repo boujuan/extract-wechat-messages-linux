@@ -100,6 +100,8 @@ def _add_common_render_args(sp, *, include_pipeline: bool = False):
                        help="Override just the output directory (default: <workspace>/output/).")
     g_out.add_argument("--my-label", default="Me", metavar="STR",
                        help="Label for your own messages in renders. Default: %(default)s.")
+    g_out.add_argument("--stats", action="store_true",
+                       help="Also print the per-contact stats panel after the final summary.")
 
     g_compact = sp.add_argument_group("Compression / styling (TXT-B)")
     g_compact.add_argument("--time-precision", choices=("seconds", "minutes"),
@@ -204,8 +206,11 @@ def build_parser() -> argparse.ArgumentParser:
                         formatter_class=Formatter)
     sp.add_argument("--alias", metavar="WECHAT_ID",
                     help="WeChat ID of one contact (default: all contacts in the picker list).")
-    sp.add_argument("--image-key", metavar="HEX",
-                    help="16-byte AES key (32 hex chars) for V2 images. Without it, V2 files are skipped.")
+    sp.add_argument("--image-key", metavar="HEX_OR_ASCII",
+                    help="Override the V2 AES key (32 hex chars OR 16 ASCII chars). "
+                         "Default: auto-recover from a running WeChat process and cache.")
+    sp.add_argument("--force-image-key", action="store_true",
+                    help="Ignore the cached image key and re-scan WeChat memory.")
     sp.add_argument("--out-dir", metavar="PATH",
                     help="Where to write decrypted images. Default: <workspace>/media/<alias>/.")
     sp.add_argument("--include-thumbs", action="store_true",
@@ -816,6 +821,7 @@ def _cmd_render(args, workspace: Path, log, ui=None) -> int:
     first_ts = None
     last_ts = 0
     summary_contact = contacts[0] if contacts else None
+    per_contact_msgs: list = []        # [(contact, msgs)] — kept for --stats
     for i, contact in enumerate(contacts):
         if ui and i > 0:
             ui.begin("Extract", f"({i + 1}/{len(contacts)}) {contact.display_name}…")
@@ -830,10 +836,9 @@ def _cmd_render(args, workspace: Path, log, ui=None) -> int:
                 first_ts = msgs[0].create_time
             if msgs[-1].create_time > last_ts:
                 last_ts = msgs[-1].create_time
+            per_contact_msgs.append((contact, msgs))
 
     if rc_overall == 0 and all_outputs and not getattr(args, "no_summary", False) and summary_contact:
-        # Use the first contact for the summary header when single; for many,
-        # emit a synthetic "N contacts" pseudo-record so the panel still renders.
         if len(contacts) == 1:
             sc = summary_contact
         else:
@@ -844,6 +849,18 @@ def _cmd_render(args, workspace: Path, log, ui=None) -> int:
         _print_summary_with_range(sc, all_msgs_sum, all_recall_sum,
                                   first, last, all_outputs, workspace, ui,
                                   total_time=time.perf_counter() - t_start)
+    # --stats: per-contact analytics panel(s)
+    if rc_overall == 0 and getattr(args, "stats", False) and per_contact_msgs:
+        import shutil as _sh
+
+        from wxextract import stats as _stats
+        if ui:
+            ui.stop()
+        width = _sh.get_terminal_size((140, 24)).columns
+        cons = Console(width=max(width, 120))
+        for contact, msgs in per_contact_msgs:
+            counts = _stats.compute(msgs, contact, my_label=args.my_label, top_n=12)
+            _stats.render(counts, contact, args.my_label, cons)
     return rc_overall
 
 
@@ -965,16 +982,111 @@ def _is_recall_msg(m) -> bool:
     return _is_recall(m.type, m.content)
 
 
+_IMG_KEY_CACHE = "image_key.json"
+
+
+def _load_cached_image_key(workspace: Path) -> tuple[bytes, int] | None:
+    """Return (aes_key, xor_key) from workspace/image_key.json, or None."""
+    p = workspace / _IMG_KEY_CACHE
+    if not p.is_file():
+        return None
+    try:
+        data = json.loads(p.read_text())
+        aes = bytes.fromhex(data["aes_key_hex"])
+        xor = int(data.get("xor_key", 0x88))
+        if len(aes) == 16:
+            return aes, xor
+    except (OSError, ValueError, KeyError, json.JSONDecodeError):
+        pass
+    return None
+
+
+def _save_cached_image_key(workspace: Path, aes: bytes, xor: int) -> None:
+    import stat as _stat
+    p = workspace / _IMG_KEY_CACHE
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps({"aes_key_hex": aes.hex(),
+                             "xor_key": int(xor)}, indent=2))
+    try:
+        p.chmod(_stat.S_IRUSR | _stat.S_IWUSR)
+    except OSError:
+        pass
+
+
 def _cmd_images(args, workspace: Path, log) -> int:
-    """Decrypt .dat images for one contact (or all)."""
-    from wxextract import discover, images
+    """Decrypt .dat images for one contact (or all).
+
+    AES key is auto-recovered from a running WeChat process on first run;
+    subsequent runs read from workspace/image_key.json. Use --force-image-key
+    to re-scan. Manual override: --image-key HEX (16 bytes = 32 hex chars,
+    OR a 16-char ASCII string is also accepted).
+    """
+    from wxextract import discover, images, lifecycle
     from wxextract.contacts import find_by_alias, load_contacts
     plain = workspace / "plain_dbs"
     if not plain.is_dir():
         print(f"[!] no plain_dbs at {plain}. Run `wxextract run` first.")
         return 2
     d = discover.discover()
-    aes_key = bytes.fromhex(args.image_key) if args.image_key else None
+
+    # ── resolve AES key + XOR key ─────────────────────────────────────────
+    aes_key: bytes | None = None
+    xor_key: int = 0x88
+    if args.image_key:
+        raw = args.image_key.strip()
+        try:
+            aes_key = bytes.fromhex(raw)
+            if len(aes_key) != 16:
+                raise ValueError
+        except ValueError:
+            if len(raw) == 16:
+                aes_key = raw.encode("ascii")
+            else:
+                print(f"[!] --image-key must be 32 hex chars or 16 ASCII chars, got {len(raw)}")
+                return 2
+        log.info(f"image key from --image-key flag ({aes_key.hex()[:8]}…)")
+    elif not args.force_image_key:
+        cached = _load_cached_image_key(workspace)
+        if cached is not None:
+            aes_key, xor_key = cached
+            log.info(f"image key from cache ({aes_key.hex()[:8]}…, xor=0x{xor_key:02x})")
+
+    if aes_key is None:
+        # need to recover from memory — pick MULTIPLE test ciphertexts so a
+        # candidate must validate against all of them (kills false positives)
+        vectors = images.pick_test_ciphertexts(d.account_dir, n=5)
+        if not vectors:
+            print("[!] no V2 .dat files found — nothing to decrypt.")
+            return 0
+        log.info(f"using {len(vectors)} test vector(s) for key cross-validation: "
+                 + ", ".join(p.name for _, p in vectors))
+        xor_key = images.derive_xor_key(d.account_dir)
+        log.info(f"derived xor key: 0x{xor_key:02x}")
+        pids = []
+        bin_str = str(d.binary_path) if d.binary_path else None
+        mp = lifecycle.main_wechat_pid(binary=bin_str)
+        if mp:
+            pids.append(mp)
+        pids += [p for p in lifecycle.wechat_running() if p != mp]
+        if not pids:
+            print("[!] WeChat is not running — cannot scan memory for the image AES key.")
+            print("    Either: (a) open WeChat, view 2-3 images, then re-run, or")
+            print("            (b) supply the key manually with --image-key.")
+            return 3
+        log.info(f"scanning {len(pids)} WeChat process(es) for image AES key…")
+        aes_key = images.find_v2_aes_key(pids, vectors)
+        if aes_key is None:
+            print("[!] could not recover the image AES key from memory.")
+            print("    The key is only cached after you view images in WeChat. Tips:")
+            print("      1. open the WeChat UI and click into a chat with photos")
+            print("      2. tap 2-3 thumbnails so the keys get loaded into the process")
+            print("      3. immediately re-run  wxextract images …")
+            return 3
+        log.info(f"recovered image AES key: {aes_key!r} (cross-validated against {len(vectors)} files)")
+        _save_cached_image_key(workspace, aes_key, xor_key)
+        log.info(f"saved → workspace/{_IMG_KEY_CACHE}")
+
+    # ── walk + decrypt ────────────────────────────────────────────────────
     recs = load_contacts(plain)
     if args.alias:
         c = find_by_alias(recs, args.alias)
@@ -996,17 +1108,20 @@ def _cmd_images(args, workspace: Path, log) -> int:
                 continue
             any_for_contact = True
             is_v2 = images.is_v2(dat)
-            if is_v2 and aes_key is None:
-                n_skipped += 1
-                continue
             try:
-                result = images.decrypt(dat, aes_key=aes_key)
+                if is_v2:
+                    result = images.decrypt_v2(dat, aes_key, xor_key=xor_key)
+                else:
+                    result = images.decrypt_v1(dat)
             except Exception as e:
                 log.error(f"  fail {dat.name}: {e}")
                 n_failed += 1
                 continue
             if result is None:
-                n_failed += 1
+                if is_v2:
+                    n_skipped += 1  # V2 decrypt failed → wrong key or different XOR
+                else:
+                    n_failed += 1
                 continue
             data, fmt = result
             rel = dat.relative_to(d.account_dir / "msg" / "attach" / conv_hash)
@@ -1019,10 +1134,9 @@ def _cmd_images(args, workspace: Path, log) -> int:
                 n_v1 += 1
         if any_for_contact:
             log.info(f"  {c.display_name} → {dst_root}")
-    print(f"images: v1={n_v1}  v2={n_v2}  skipped(v2-no-key)={n_skipped}  failed={n_failed}")
-    if n_skipped:
-        print("       (pass --image-key HEX to decrypt the V2 ones; "
-              "recovery of the AES key from memory is not yet implemented natively)")
+    print(f"images: v1={n_v1}  v2={n_v2}  failed={n_failed}  v2-skipped(decrypt-fail)={n_skipped}")
+    if n_v2 == 0 and n_skipped > 0:
+        print("       (no V2 images decrypted successfully — try --force-image-key to re-scan)")
     return 0
 
 

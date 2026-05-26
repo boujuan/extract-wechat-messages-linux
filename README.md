@@ -109,6 +109,8 @@ wxextract list                                # contacts table (after first run)
 wxextract resnap                              # close WeChat → fresh snapshot + decrypt → re-open
 wxextract render --alias X                    # render without re-snapshotting
 wxextract preview --alias X --tail 20         # print last N messages, no files written
+wxextract stats   --alias X                   # per-contact analytics panel
+wxextract images  --alias X                   # decrypt .dat image attachments
 wxextract run                                 # everything end-to-end (default)
 ```
 
@@ -132,6 +134,10 @@ wxextract run                                 # everything end-to-end (default)
 --out-dir PATH                   # override just the output directory (rendered files)
 --workspace PATH                 # override default workspace location
 --account-dir PATH               # explicit WeChat account folder (for multi-account systems)
+--all-contacts --min-messages N  # batch-extract every contact (≥ N msgs)
+--since-last                     # incremental: emit only new messages since the last run
+--stats                          # also print the per-contact analytics panel after the summary
+--no-update-check                # skip the once-per-day GitHub releases check
 ```
 
 ### Compression dial

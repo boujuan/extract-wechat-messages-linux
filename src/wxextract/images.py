@@ -166,3 +166,212 @@ def walk_dat_files(account_dir: Path, conv_hash: str | None = None):
         if not attach.is_dir():
             return
     yield from attach.rglob("*.dat")
+
+
+# ---------------------------------------------------------------------------
+# V2 AES image-key recovery (memory scan) — Linux /proc/PID/mem
+# ---------------------------------------------------------------------------
+
+import re as _re  # noqa: E402
+
+# Image AES keys observed in WeChat are 16-byte alphanumeric ASCII strings.
+# We scan in two passes:
+#   1. Standalone 16-/32-char alphanum tokens (fast, catches most installs).
+#   2. Sliding window within longer alphanum runs (catches keys embedded in
+#      surrounding text without non-alphanum boundary). Triggered only if (1)
+#      finds nothing.
+_RE_KEY16 = _re.compile(rb"(?<![A-Za-z0-9])[A-Za-z0-9]{16}(?![A-Za-z0-9])")
+_RE_KEY32 = _re.compile(rb"(?<![A-Za-z0-9])[A-Za-z0-9]{32}(?![A-Za-z0-9])")
+_RE_LONG_RUN = _re.compile(rb"[A-Za-z0-9]{17,}")
+
+# 3+ byte magics only (2-byte 'BM' produces too many false positives at
+# 1/65536 — with 16-char alphanum candidates scanned over hundreds of MB of
+# memory, you get random AES output matching BM coincidentally).
+_IMAGE_FORMAT_MAGICS = (
+    bytes([0xFF, 0xD8, 0xFF]),         # JPEG
+    bytes([0x89, 0x50, 0x4E, 0x47]),   # PNG
+    b"GIF8",                            # GIF87a/89a
+    b"RIFF",                            # WebP container (first 4 bytes)
+    b"wxgf",                            # WeChat HEVC stream
+    bytes([0x49, 0x49, 0x2A, 0x00]),   # TIFF little-endian
+)
+
+
+def pick_test_ciphertexts(account_dir: Path, n: int = 5) -> list[tuple[bytes, Path]]:
+    """Pick up to `n` V2 .dat files (mix of thumbnails + full-size) and return
+    each's first AES block as a (ciphertext, file_path) test vector.
+
+    We use MULTIPLE samples for key validation: a candidate key only counts
+    as the right one if it decrypts ALL samples to a known image magic. Any
+    16-byte alphanumeric string has a ~1/2^24 chance of randomly producing
+    a 3-byte JPEG magic for one sample; the chance of doing that for ≥3
+    independent samples is ~1/2^72 — effectively impossible.
+    """
+    attach = account_dir / "msg" / "attach"
+    if not attach.is_dir():
+        return []
+    paths_thumb = sorted(attach.rglob("Img/*_t.dat"),
+                         key=lambda p: -p.stat().st_mtime if p.exists() else 0)
+    paths_full = sorted([p for p in attach.rglob("Img/*.dat")
+                         if not p.stem.endswith("_t")],
+                        key=lambda p: -p.stat().st_mtime if p.exists() else 0)
+    out: list[tuple[bytes, Path]] = []
+    # interleave thumb + full for variety
+    candidates = []
+    for i in range(max(len(paths_thumb), len(paths_full))):
+        if i < len(paths_thumb):
+            candidates.append(paths_thumb[i])
+        if i < len(paths_full):
+            candidates.append(paths_full[i])
+    for p in candidates:
+        if len(out) >= n:
+            break
+        try:
+            with open(p, "rb") as f:
+                head = f.read(31)
+        except OSError:
+            continue
+        if len(head) == 31 and head[:4] == V2_MAGIC[:4]:
+            out.append((head[15:31], p))
+    return out
+
+
+def pick_test_ciphertext(account_dir: Path) -> tuple[bytes, Path] | None:
+    """Back-compat single-vector picker."""
+    vectors = pick_test_ciphertexts(account_dir, n=1)
+    return vectors[0] if vectors else None
+
+
+def _try_key(key: bytes, ciphertext: bytes) -> str | None:
+    """Decrypt the 16-byte ciphertext with `key` (AES-128-ECB). If the
+    plaintext starts with a known image magic, return the format name.
+    Otherwise None."""
+    from Crypto.Cipher import AES
+    try:
+        plain = AES.new(key[:16], AES.MODE_ECB).decrypt(ciphertext)
+    except (ValueError, KeyError):
+        return None
+    for magic in _IMAGE_FORMAT_MAGICS:
+        if plain.startswith(magic):
+            return magic.decode("latin-1", errors="replace")
+    return None
+
+
+def find_v2_aes_key(pids: list[int],
+                    test_vectors: list[tuple[bytes, Path]] | bytes,
+                    progress_cb=None) -> bytes | None:
+    """Scan each PID's readable memory for the V2 image AES key.
+
+    `test_vectors` is a list of (ciphertext, file_path) pairs (recommended
+    ≥3 for cross-validation). A legacy single `bytes` input is also
+    accepted for back-compat — but use the list form to avoid false
+    positives. A candidate is accepted only when it produces a known image
+    magic for EVERY supplied test vector.
+
+    Returns the key as bytes (16 long) or None.
+    """
+    if isinstance(test_vectors, (bytes, bytearray)):
+        # back-compat: wrap single ciphertext, no extra validation
+        ciphers = [bytes(test_vectors)]
+    else:
+        ciphers = [c for c, _p in test_vectors]
+    if not ciphers:
+        return None
+
+    from wxextract.keys import list_regions
+
+    def _validates_all(candidate: bytes) -> bool:
+        return all(_try_key(candidate, c) for c in ciphers)
+
+    tried: set[bytes] = set()  # avoid re-validating the same string from multiple regions
+
+    # Pass 1 — exact boundary 16/32 alphanum tokens
+    for pid in pids:
+        try:
+            regions = list_regions(pid)
+        except (OSError, PermissionError):
+            continue
+        total = len(regions)
+        for i, region in enumerate(regions):
+            if progress_cb:
+                progress_cb(pid, i, total, region)
+            try:
+                with open(f"/proc/{pid}/mem", "rb", buffering=0) as mem:
+                    mem.seek(region.start)
+                    data = mem.read(region.size)
+            except (OSError, ValueError):
+                continue
+            for m in _RE_KEY16.finditer(data):
+                cand = m.group()
+                if cand in tried:
+                    continue
+                tried.add(cand)
+                if _try_key(cand, ciphers[0]) and _validates_all(cand):
+                    return cand
+            for m in _RE_KEY32.finditer(data):
+                cand = m.group()[:16]
+                if cand in tried:
+                    continue
+                tried.add(cand)
+                if _try_key(cand, ciphers[0]) and _validates_all(cand):
+                    return cand
+
+    # Pass 2 — sliding window within long alphanum runs (key embedded in larger string)
+    for pid in pids:
+        try:
+            regions = list_regions(pid)
+        except (OSError, PermissionError):
+            continue
+        for region in regions:
+            try:
+                with open(f"/proc/{pid}/mem", "rb", buffering=0) as mem:
+                    mem.seek(region.start)
+                    data = mem.read(region.size)
+            except (OSError, ValueError):
+                continue
+            for m in _RE_LONG_RUN.finditer(data):
+                run = m.group()
+                for off in range(len(run) - 15):
+                    cand = run[off:off + 16]
+                    if cand in tried:
+                        continue
+                    tried.add(cand)
+                    if _try_key(cand, ciphers[0]) and _validates_all(cand):
+                        return cand
+    return None
+
+
+def derive_xor_key(account_dir: Path, sample_size: int = 32) -> int:
+    """Most WeChat V2 .dat files use a constant XOR key (0x88 by default,
+    but we verify empirically). Sample several thumbnails: the last 2 bytes
+    of each (after V2 XOR) should be (FF, D9) — the JPEG EOI marker. The
+    mode of (last_byte XOR D9) across files is the XOR key. Falls back to
+    0x88 if nothing conclusive."""
+    from collections import Counter
+    attach = account_dir / "msg" / "attach"
+    if not attach.is_dir():
+        return 0x88
+    candidates: Counter[int] = Counter()
+    paths = sorted(attach.rglob("Img/*_t.dat"),
+                   key=lambda p: -p.stat().st_mtime if p.exists() else 0)
+    for p in paths[:sample_size]:
+        try:
+            sz = p.stat().st_size
+            if sz < 32:
+                continue
+            with open(p, "rb") as f:
+                head = f.read(6)
+                f.seek(sz - 2)
+                tail = f.read(2)
+        except OSError:
+            continue
+        if head != V2_MAGIC or len(tail) != 2:
+            continue
+        x, y = tail
+        k1 = x ^ 0xFF
+        k2 = y ^ 0xD9
+        if k1 == k2:
+            candidates[k1] += 1
+    if candidates:
+        return candidates.most_common(1)[0][0]
+    return 0x88

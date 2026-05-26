@@ -6,6 +6,60 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-05-26
+
+Stats & polish release. Adds bidirectional analytics, daily timeline,
+inline stats during extraction, V2 image-key memory recovery, and several
+UX fixes around the picker, the bare-invocation crash, and the GitHub
+update notifier.
+
+### Added
+
+- **`--stats` flag on `run` / `render`** — print the per-contact stats
+  panel inline after the extraction summary. Saves a separate
+  `wxextract stats` call.
+- **Bidirectional response-time analysis**: separate panels for
+  "Me → Other" and "Other → Me" with p50/p75/p90/p99/max.
+- **Daily timeline panel** — per-day stacked bar (yours vs theirs) over
+  the conversation's full range; auto-falls back to weekly buckets for
+  conversations longer than ~120 days.
+- **Unified emoji counts** — `stats.compute()` now runs the same sticker
+  → Unicode mapping before counting, so `[Facepalm]` and `🤦` no longer
+  show up as separate rows. Opt-out via `unify_emoji_tags=False`.
+- **V2 image-key memory recovery (best-effort)** — `wxextract images`
+  now auto-scans WeChat processes for the 16-byte AES key, validates
+  against ≥5 cross-file test vectors (random `BM` false-positive
+  eliminated), and caches to `workspace/image_key.json`.
+  `--force-image-key` re-scans; `--image-key HEX|ASCII` overrides
+  manually. Falls back gracefully when the key isn't currently cached
+  in memory (recommends opening WeChat + viewing a few images).
+- **XOR-key derivation** — empirical detection of the V2 XOR byte from
+  the JPEG EOI markers in thumbnails (falls back to `0x88`).
+- **GitHub release auto-update notice** — once-per-day silent check
+  against the releases API; prints a one-line "uv tool upgrade wxextract"
+  notice when a newer tag exists. `--no-update-check` /
+  `WXE_NO_UPDATE_CHECK=1` to disable. New `Updating` section in `--help`.
+
+### Fixed
+
+- **AttributeError on bare invocation** (`wxextract`, `wxextract -v`,
+  `wxextract --workspace …`). The auto-injection helper now appends
+  `run` when no subcommand was provided.
+- **Picker freeze + lost Ctrl+C** when verbose logging scrolled the
+  prompt off-screen. Added a `rich.rule()` banner immediately before
+  the prompt, `try/except KeyboardInterrupt + EOFError` in `pick()`,
+  and a top-level Ctrl+C catch in `main()` that returns exit code 130.
+- **Stats `daily_counts` field** now exposed for downstream tooling.
+
+### Documentation
+
+- README updated with all v0.2 flags and the "Updating" section.
+- CHANGELOG follows Keep-a-Changelog format with full
+  Added / Fixed / Documentation sections per release.
+
+[Unreleased]: https://github.com/boujuan/extract-wechat-messages-linux/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/boujuan/extract-wechat-messages-linux/releases/tag/v0.2.0
+
 ## [0.1.0] - 2026-05-26
 
 First public release.
@@ -79,5 +133,4 @@ First public release.
 - `NOTICE.md` crediting the SQLCipher 4 spec + `L1en2407/wechat-decrypt`
   as the reference implementation.
 
-[Unreleased]: https://github.com/boujuan/extract-wechat-messages-linux/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/boujuan/extract-wechat-messages-linux/releases/tag/v0.1.0

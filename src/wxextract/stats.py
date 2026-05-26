@@ -57,12 +57,16 @@ class Counts:
     by_hour: dict[int, int] = field(default_factory=Counter)         # 0..23
     top_emojis: list[tuple[str, int]] = field(default_factory=list)
     top_words: list[tuple[str, int]] = field(default_factory=list)
-    response_time_seconds: list[int] = field(default_factory=list)   # other → me delays
+    response_time_seconds: list[int] = field(default_factory=list)        # me → them (incoming→my outgoing)
+    their_response_time_seconds: list[int] = field(default_factory=list)  # them → me (my outgoing→their incoming)
     longest_silence_seconds: int = 0
     longest_silence_between: tuple[str, str] = ("", "")              # (iso_a, iso_b)
     first_ts: int = 0
     last_ts: int = 0
     active_days: int = 0
+    daily_counts: dict[str, int] = field(default_factory=dict)       # "2026-04-09" → total
+    daily_me:     dict[str, int] = field(default_factory=dict)
+    daily_them:   dict[str, int] = field(default_factory=dict)
 
 
 _TYPE_LABEL = {
@@ -78,7 +82,14 @@ _TYPE_LABEL = {
 
 
 def compute(messages: list[Message], contact: ContactRecord, my_label: str = "Me",
-            top_n: int = 12) -> Counts:
+            top_n: int = 12, unify_emoji_tags: bool = True) -> Counts:
+    """Compute per-contact analytics.
+
+    `unify_emoji_tags`: when True (default), [Facepalm] / [Drool] / etc. are
+    mapped to their Unicode equivalent before counting, so the top-emoji list
+    isn't split between the tag form and the Unicode form for the same sticker.
+    """
+    from wxextract.render.common import sticker_to_emoji
     c = Counts()
     if not messages:
         return c
@@ -87,11 +98,16 @@ def compute(messages: list[Message], contact: ContactRecord, my_label: str = "Me
     emoji_counter: Counter[str] = Counter()
     word_counter: Counter[str] = Counter()
     days: set[str] = set()
+    daily: Counter[str] = Counter()
+    daily_me: Counter[str] = Counter()
+    daily_them: Counter[str] = Counter()
 
     c.first_ts = messages[0].create_time
     c.last_ts = messages[-1].create_time
     prev_ts = None
-    pending_other_ts: int | None = None
+    # bidirectional response-time tracking: two pending "first-after-flip" timestamps
+    pending_other_ts: int | None = None     # them speaking, waiting for my reply
+    pending_me_ts: int | None = None        # me speaking, waiting for their reply
 
     for m in messages:
         c.total += 1
@@ -99,12 +115,18 @@ def compute(messages: list[Message], contact: ContactRecord, my_label: str = "Me
         c.by_sender[sender] += 1
         c.by_type[m.type] += 1
         dt = datetime.fromtimestamp(m.create_time)
+        date_str = dt.strftime("%Y-%m-%d")
         c.by_month[dt.strftime("%Y-%m")] += 1
         c.by_weekday[dt.weekday()] += 1
         c.by_hour[dt.hour] += 1
-        days.add(dt.strftime("%Y-%m-%d"))
+        days.add(date_str)
+        daily[date_str] += 1
+        if m.is_me:
+            daily_me[date_str] += 1
+        elif m.sender_username == contact.username:
+            daily_them[date_str] += 1
 
-        # silence / response time tracking
+        # silence + bidirectional response time
         if prev_ts is not None:
             gap = m.create_time - prev_ts
             if gap > c.longest_silence_seconds:
@@ -113,18 +135,28 @@ def compute(messages: list[Message], contact: ContactRecord, my_label: str = "Me
                     datetime.fromtimestamp(prev_ts).isoformat(timespec="minutes"),
                     dt.isoformat(timespec="minutes"),
                 )
-            if pending_other_ts is not None and m.is_me:
-                c.response_time_seconds.append(m.create_time - pending_other_ts)
-                pending_other_ts = None
-            elif not m.is_me and pending_other_ts is None:
-                pending_other_ts = m.create_time
+            if m.is_me:
+                if pending_other_ts is not None:
+                    c.response_time_seconds.append(m.create_time - pending_other_ts)
+                    pending_other_ts = None
+                # remember when *I* started waiting for their reply
+                if pending_me_ts is None:
+                    pending_me_ts = m.create_time
+            elif m.sender_username == contact.username:
+                if pending_me_ts is not None:
+                    c.their_response_time_seconds.append(m.create_time - pending_me_ts)
+                    pending_me_ts = None
+                if pending_other_ts is None:
+                    pending_other_ts = m.create_time
         else:
-            pending_other_ts = m.create_time if not m.is_me else None
+            if m.is_me:
+                pending_me_ts = m.create_time
+            elif m.sender_username == contact.username:
+                pending_other_ts = m.create_time
         prev_ts = m.create_time
 
-        # text-mining: only TEXT messages for emoji/word counts
         if m.type == TYPE_TEXT and m.content:
-            text = m.content
+            text = sticker_to_emoji(m.content) if unify_emoji_tags else m.content
             for tag in _EMOJI_TAG_RE.findall(text):
                 emoji_counter[tag] += 1
             for ch in _UNICODE_EMOJI_RE.findall(text):
@@ -139,6 +171,9 @@ def compute(messages: list[Message], contact: ContactRecord, my_label: str = "Me
     c.top_emojis = emoji_counter.most_common(top_n)
     c.top_words = word_counter.most_common(top_n)
     c.active_days = len(days)
+    c.daily_counts = dict(daily)
+    c.daily_me = dict(daily_me)
+    c.daily_them = dict(daily_them)
     return c
 
 
@@ -170,6 +205,112 @@ def _percentile(seq: list[int], p: float) -> int:
     s = sorted(seq)
     k = int(round((len(s) - 1) * p))
     return s[k]
+
+
+def _response_table(title: str, rt: list[int]):
+    from rich.box import ROUNDED
+    from rich.table import Table
+    t = Table(box=ROUNDED, show_header=True, header_style="bold cyan",
+              title=f"Response time: {title}", title_style="bold")
+    t.add_column("Stat")
+    t.add_column("Value", justify="right", style="bright_white")
+    if rt:
+        t.add_row("Samples", f"{len(rt):,}")
+        t.add_row("Median",  _fmt_dur(_percentile(rt, 0.5)))
+        t.add_row("p75",     _fmt_dur(_percentile(rt, 0.75)))
+        t.add_row("p90",     _fmt_dur(_percentile(rt, 0.9)))
+        t.add_row("p99",     _fmt_dur(_percentile(rt, 0.99)))
+        t.add_row("Max",     _fmt_dur(max(rt)))
+    else:
+        t.add_row("Samples", "0 (one-way conversation)")
+    return t
+
+
+def _render_daily_timeline(c: Counts, my_label: str, other_name: str):
+    """Per-day stacked bar of message volume; auto-falls back to per-week for long ranges."""
+    from datetime import date as _date
+    from datetime import timedelta
+
+    from rich.console import Group
+    from rich.panel import Panel
+    from rich.table import Table
+    from rich.text import Text
+
+    if not c.daily_counts:
+        return Panel(Text("(no data)"), title="Daily timeline", border_style="cyan",
+                     expand=False, padding=(0, 1))
+
+    # build a complete day list across the full range (zero-fill gaps)
+    first = _date.fromtimestamp(c.first_ts) if c.first_ts else None
+    last = _date.fromtimestamp(c.last_ts) if c.last_ts else None
+    days: list[_date] = []
+    d = first
+    while d and last and d <= last:
+        days.append(d)
+        d = d + timedelta(days=1)
+    bucket = "day"
+    if len(days) > 120:
+        # collapse to weekly buckets (ISO week start)
+        weekly: dict[str, dict[str, int]] = {}
+        for d in days:
+            key = (d - timedelta(days=d.weekday())).isoformat()
+            agg = weekly.setdefault(key, {"all": 0, "me": 0, "them": 0})
+            iso = d.isoformat()
+            agg["all"] += c.daily_counts.get(iso, 0)
+            agg["me"] += c.daily_me.get(iso, 0)
+            agg["them"] += c.daily_them.get(iso, 0)
+        buckets = list(weekly.items())
+        bucket = "week"
+    else:
+        buckets = [(d.isoformat(), {
+            "all": c.daily_counts.get(d.isoformat(), 0),
+            "me": c.daily_me.get(d.isoformat(), 0),
+            "them": c.daily_them.get(d.isoformat(), 0),
+        }) for d in days]
+
+    max_total = max((b["all"] for _, b in buckets), default=0)
+    if max_total == 0:
+        return Panel(Text("(no data)"), title="Daily timeline", border_style="cyan",
+                     expand=False, padding=(0, 1))
+
+    bar_width = 40
+    t = Table.grid(padding=(0, 1))
+    t.add_column(width=11, no_wrap=True)        # date / week-start
+    t.add_column(width=bar_width + 2)            # stacked bar
+    t.add_column(width=10, justify="right")     # count
+    t.add_column(width=14, justify="right", style="dim")  # split
+
+    for key, agg in buckets:
+        total = agg["all"]
+        me = agg["me"]
+        them = agg["them"]
+        if total == 0:
+            bar = Text("·", style="dim")
+        else:
+            cells = max(1, round(total / max_total * bar_width))
+            me_cells = round(cells * me / total) if total else 0
+            them_cells = max(0, cells - me_cells)
+            bar = Text()
+            bar.append("█" * me_cells, style="cyan")
+            bar.append("█" * them_cells, style="magenta")
+        t.add_row(
+            Text(key, style="cyan"),
+            bar,
+            Text(f"{total:,}" if total else "·",
+                 style="bright_white" if total else "dim"),
+            Text(f"{me:,}/{them:,}" if total else "",
+                 style="dim"),
+        )
+
+    legend = Text()
+    legend.append("█", style="cyan")
+    legend.append(f" {my_label}    ", style="dim")
+    legend.append("█", style="magenta")
+    legend.append(f" {other_name}", style="dim")
+
+    title = "Daily timeline" if bucket == "day" else "Weekly timeline (ISO week start; range too long for per-day)"
+    return Panel(Group(t, legend), title=title, border_style="cyan",
+                 expand=False, padding=(0, 1))
 
 
 def render(c: Counts, contact: ContactRecord, my_label: str, console) -> None:
@@ -272,21 +413,10 @@ def render(c: Counts, contact: ContactRecord, my_label: str, console) -> None:
     for w, n in c.top_words:
         t_words.add_row(w, f"{n:,}")
 
-    # ── response-time stats ────────────────────────────────────────────────
-    t_resp = Table(box=ROUNDED, show_header=True, header_style="bold cyan",
-                   title="Your response time to them", title_style="bold")
-    t_resp.add_column("Stat")
-    t_resp.add_column("Value", justify="right", style="bright_white")
-    rt = c.response_time_seconds
-    if rt:
-        t_resp.add_row("Samples", f"{len(rt):,}")
-        t_resp.add_row("Median",  _fmt_dur(_percentile(rt, 0.5)))
-        t_resp.add_row("p75",     _fmt_dur(_percentile(rt, 0.75)))
-        t_resp.add_row("p90",     _fmt_dur(_percentile(rt, 0.9)))
-        t_resp.add_row("p99",     _fmt_dur(_percentile(rt, 0.99)))
-        t_resp.add_row("Max",     _fmt_dur(max(rt)))
-    else:
-        t_resp.add_row("Samples", "0 (no incoming messages to respond to)")
+    # ── bidirectional response time ──────────────────────────────────────────
+    other_name = contact.display_name
+    t_resp_mine = _response_table(f"{my_label} → {other_name}", c.response_time_seconds)
+    t_resp_their = _response_table(f"{other_name} → {my_label}", c.their_response_time_seconds)
 
     t_silence = Table(box=ROUNDED, show_header=True, header_style="bold cyan",
                       title="Silence", title_style="bold")
@@ -296,12 +426,17 @@ def render(c: Counts, contact: ContactRecord, my_label: str, console) -> None:
     t_silence.add_row("Between",
                       f"{c.longest_silence_between[0]} → {c.longest_silence_between[1]}")
 
+    # ── daily timeline ────────────────────────────────────────────────────
+    daily_panel = _render_daily_timeline(c, my_label, other_name)
+
     body = Group(head, "",
                  t_types, "",
                  t_months, "",
+                 daily_panel, "",
                  hour_panel, dow_panel, "",
                  t_emoji, t_words, "",
-                 t_resp, t_silence)
+                 t_resp_mine, t_resp_their, "",
+                 t_silence)
     console.print()
     console.print(Panel(body, title=Text("Conversation stats", style="bold green"),
                         border_style="green", padding=(1, 2), expand=False))
