@@ -179,6 +179,22 @@ def build_parser() -> argparse.ArgumentParser:
     g_resnap.add_argument("--no-relaunch", action="store_true",
                           help="Don't re-launch WeChat afterwards (avoids the login-confirm dialog).")
 
+    sp = sub.add_parser("images",
+                        help="Decrypt WeChat .dat image attachments into JPG/PNG/GIF/etc.",
+                        description="Walk the message-attachment tree for a contact (or all) and "
+                                    "decrypt every .dat image. V1 (legacy single-byte XOR) works "
+                                    "automatically. V2 (WeChat ≥ 2025-08) requires --image-key with "
+                                    "the 16-byte AES key from a WeChat memory scan.",
+                        formatter_class=Formatter)
+    sp.add_argument("--alias", metavar="WECHAT_ID",
+                    help="WeChat ID of one contact (default: all contacts in the picker list).")
+    sp.add_argument("--image-key", metavar="HEX",
+                    help="16-byte AES key (32 hex chars) for V2 images. Without it, V2 files are skipped.")
+    sp.add_argument("--out-dir", metavar="PATH",
+                    help="Where to write decrypted images. Default: <workspace>/media/<alias>/.")
+    sp.add_argument("--include-thumbs", action="store_true",
+                    help="Also decrypt _t.dat thumbnails (default: skip).")
+
     sp = sub.add_parser("stats",
                         help="Per-contact analytics: timeline, hourly heatmap, top emojis/words, response times.",
                         description="Compute and print conversation analytics for one contact. "
@@ -299,6 +315,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_preview(args, workspace, log)
         if cmd == "stats":
             return _cmd_stats(args, workspace, log)
+        if cmd == "images":
+            return _cmd_images(args, workspace, log)
         if cmd == "run":
             return _cmd_run(args, workspace, log, ui=ui)
         parser.print_help()
@@ -907,6 +925,67 @@ def _print_summary_with_range(contact, message_count, recall_count, first_dt, la
 def _is_recall_msg(m) -> bool:
     from wxextract.messages import _is_recall
     return _is_recall(m.type, m.content)
+
+
+def _cmd_images(args, workspace: Path, log) -> int:
+    """Decrypt .dat images for one contact (or all)."""
+    from wxextract import discover, images
+    from wxextract.contacts import find_by_alias, load_contacts
+    plain = workspace / "plain_dbs"
+    if not plain.is_dir():
+        print(f"[!] no plain_dbs at {plain}. Run `wxextract run` first.")
+        return 2
+    d = discover.discover()
+    aes_key = bytes.fromhex(args.image_key) if args.image_key else None
+    recs = load_contacts(plain)
+    if args.alias:
+        c = find_by_alias(recs, args.alias)
+        if c is None:
+            print(f"[!] alias {args.alias!r} not found")
+            return 2
+        targets = [c]
+    else:
+        targets = recs
+    base_out = (Path(args.out_dir).expanduser().resolve()
+                if args.out_dir else workspace / "media")
+    n_v1 = n_v2 = n_skipped = n_failed = 0
+    for c in targets:
+        conv_hash = c.md5_table().removeprefix("Msg_")
+        dst_root = base_out / (c.alias or c.username or "unknown")
+        any_for_contact = False
+        for dat in images.walk_dat_files(d.account_dir, conv_hash):
+            if not args.include_thumbs and dat.stem.endswith("_t"):
+                continue
+            any_for_contact = True
+            is_v2 = images.is_v2(dat)
+            if is_v2 and aes_key is None:
+                n_skipped += 1
+                continue
+            try:
+                result = images.decrypt(dat, aes_key=aes_key)
+            except Exception as e:
+                log.error(f"  fail {dat.name}: {e}")
+                n_failed += 1
+                continue
+            if result is None:
+                n_failed += 1
+                continue
+            data, fmt = result
+            rel = dat.relative_to(d.account_dir / "msg" / "attach" / conv_hash)
+            dst = (dst_root / rel).with_suffix("." + fmt)
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            dst.write_bytes(data)
+            if is_v2:
+                n_v2 += 1
+            else:
+                n_v1 += 1
+        if any_for_contact:
+            log.info(f"  {c.display_name} → {dst_root}")
+    print(f"images: v1={n_v1}  v2={n_v2}  skipped(v2-no-key)={n_skipped}  failed={n_failed}")
+    if n_skipped:
+        print("       (pass --image-key HEX to decrypt the V2 ones; "
+              "recovery of the AES key from memory is not yet implemented natively)")
+    return 0
 
 
 def _cmd_stats(args, workspace: Path, log) -> int:
