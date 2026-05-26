@@ -296,6 +296,14 @@ def _inject_default_subcommand(argv: list[str]) -> list[str]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    try:
+        return _main(argv)
+    except KeyboardInterrupt:
+        print("\n[cancelled]", file=sys.stderr)
+        return 130
+
+
+def _main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     raw = sys.argv[1:] if argv is None else list(argv)
     raw = _inject_default_subcommand(raw)

@@ -102,19 +102,39 @@ def _apply_filter(records: list[ContactRecord], q: str) -> list[ContactRecord]:
 def pick(records: list[ContactRecord], console: Console | None = None) -> ContactRecord | None:
     """Show the table and prompt for selection.
 
-    Returns the chosen ContactRecord, or None if the user quits.
+    Returns the chosen ContactRecord, or None if the user quits (`q`,
+    Ctrl+C, or EOF on stdin).
     """
+    from rich.panel import Panel
     console = console or Console()
     current = records
     while True:
         if not current:
-            console.print("[red]No matches — empty filter (Enter) to reset, 'q' to quit[/red]")
+            console.print()
+            console.print(Panel(
+                "[red]No matches — press [bold]Enter[/bold] to reset the filter, "
+                "[bold]q[/bold] or [bold]Ctrl+C[/bold] to quit.[/red]",
+                border_style="red", expand=False, padding=(0, 1),
+            ))
         else:
             render_table(current, console)
-        answer = Prompt.ask("Pick # / type filter / [b]q[/b] to quit", console=console).strip()
+        # Visual separator before the prompt so it doesn't disappear into
+        # whatever log output preceded the picker.
+        console.rule(
+            "[bold cyan]Pick a contact[/]  "
+            "[dim](# to choose · text to filter · q or Ctrl+C to quit)[/]",
+            style="cyan",
+        )
+        try:
+            answer = Prompt.ask("[bold]Pick #[/]", console=console, default="").strip()
+        except (KeyboardInterrupt, EOFError):
+            console.print()
+            console.print("[yellow]cancelled[/yellow]")
+            return None
         if answer.lower() in ("q", "quit", "exit"):
             return None
         if answer == "":
+            # blank input toggles back to the full unfiltered list
             current = records
             continue
         if answer.isdigit():
@@ -123,6 +143,4 @@ def pick(records: list[ContactRecord], console: Console | None = None) -> Contac
                 return current[i - 1]
             console.print(f"[yellow]out of range (1–{len(current)})[/yellow]")
             continue
-        # treat as filter
-        filtered = _apply_filter(records, answer)
-        current = filtered
+        current = _apply_filter(records, answer)
