@@ -9,6 +9,7 @@ import re
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 
 from wxextract.contacts import ContactRecord
 from wxextract.messages import (
@@ -52,13 +53,19 @@ class Counts:
     total: int = 0
     by_sender: dict[str, int] = field(default_factory=Counter)
     by_type: dict[int, int] = field(default_factory=Counter)
+    by_type_me:    dict[int, int] = field(default_factory=Counter)
+    by_type_them:  dict[int, int] = field(default_factory=Counter)
     by_month: dict[str, int] = field(default_factory=Counter)        # "2026-04"
     by_weekday: dict[int, int] = field(default_factory=Counter)      # 0=Mon
+    by_weekday_me:   dict[int, int] = field(default_factory=Counter)
+    by_weekday_them: dict[int, int] = field(default_factory=Counter)
     by_hour: dict[int, int] = field(default_factory=Counter)         # 0..23
+    by_hour_me:   dict[int, int] = field(default_factory=Counter)
+    by_hour_them: dict[int, int] = field(default_factory=Counter)
     top_emojis: list[tuple[str, int]] = field(default_factory=list)
     top_words: list[tuple[str, int]] = field(default_factory=list)
-    response_time_seconds: list[int] = field(default_factory=list)        # me → them (incoming→my outgoing)
-    their_response_time_seconds: list[int] = field(default_factory=list)  # them → me (my outgoing→their incoming)
+    response_time_seconds: list[int] = field(default_factory=list)        # me reply latency
+    their_response_time_seconds: list[int] = field(default_factory=list)  # their reply latency
     longest_silence_seconds: int = 0
     longest_silence_between: tuple[str, str] = ("", "")              # (iso_a, iso_b)
     first_ts: int = 0
@@ -70,9 +77,14 @@ class Counts:
     # chain stats — a "chain" is a run of consecutive messages from the same sender
     my_chain_lengths:    list[int] = field(default_factory=list)
     their_chain_lengths: list[int] = field(default_factory=list)
+    my_chain_words:    list[int] = field(default_factory=list)   # words per chain
+    their_chain_words: list[int] = field(default_factory=list)
     # who initiates a chain: at every switch, +1 to the side that just started talking
     chain_starts_me:    int = 0
     chain_starts_them:  int = 0
+    # word totals
+    my_total_words:    int = 0
+    their_total_words: int = 0
 
 
 _TYPE_LABEL = {
@@ -111,18 +123,23 @@ def compute(messages: list[Message], contact: ContactRecord, my_label: str = "Me
     c.first_ts = messages[0].create_time
     c.last_ts = messages[-1].create_time
     prev_ts = None
-    # bidirectional response-time tracking: two pending "first-after-flip" timestamps
-    pending_other_ts: int | None = None     # them speaking, waiting for my reply
-    pending_me_ts: int | None = None        # me speaking, waiting for their reply
-    # chain tracking
-    current_chain_side: str | None = None   # 'me' | 'them' | None
+    # bidirectional response-time tracking
+    pending_other_ts: int | None = None
+    pending_me_ts: int | None = None
+    # chain tracking — track msg-count AND word-count per chain
+    current_chain_side: str | None = None
     current_chain_len: int = 0
+    current_chain_words: int = 0
 
-    def _close_chain(side, length):
-        if side == "me" and length > 0:
+    def _close_chain(side, length, words):
+        if length <= 0:
+            return
+        if side == "me":
             c.my_chain_lengths.append(length)
-        elif side == "them" and length > 0:
+            c.my_chain_words.append(words)
+        elif side == "them":
             c.their_chain_lengths.append(length)
+            c.their_chain_words.append(words)
 
     for m in messages:
         c.total += 1
@@ -139,18 +156,37 @@ def compute(messages: list[Message], contact: ContactRecord, my_label: str = "Me
         side: str | None = None
         if m.is_me:
             daily_me[date_str] += 1
+            c.by_hour_me[dt.hour] += 1
+            c.by_weekday_me[dt.weekday()] += 1
+            c.by_type_me[m.type] += 1
             side = "me"
         elif m.sender_username == contact.username:
             daily_them[date_str] += 1
+            c.by_hour_them[dt.hour] += 1
+            c.by_weekday_them[dt.weekday()] += 1
+            c.by_type_them[m.type] += 1
             side = "them"
-        # chain bookkeeping
+
+        # word count for this message (text messages only — non-text is 0)
+        msg_words = 0
+        if m.type == TYPE_TEXT and m.content:
+            text = sticker_to_emoji(m.content) if unify_emoji_tags else m.content
+            msg_words = len(_WORD_RE.findall(text))
+        if side == "me":
+            c.my_total_words += msg_words
+        elif side == "them":
+            c.their_total_words += msg_words
+
+        # chain bookkeeping (msg + word count)
         if side is not None:
             if current_chain_side == side:
                 current_chain_len += 1
+                current_chain_words += msg_words
             else:
-                _close_chain(current_chain_side, current_chain_len)
+                _close_chain(current_chain_side, current_chain_len, current_chain_words)
                 current_chain_side = side
                 current_chain_len = 1
+                current_chain_words = msg_words
                 if side == "me":
                     c.chain_starts_me += 1
                 else:
@@ -199,7 +235,7 @@ def compute(messages: list[Message], contact: ContactRecord, my_label: str = "Me
                     sender_words[sender].append(w)
 
     # close the final open chain
-    _close_chain(current_chain_side, current_chain_len)
+    _close_chain(current_chain_side, current_chain_len, current_chain_words)
 
     c.top_emojis = emoji_counter.most_common(top_n)
     c.top_words = word_counter.most_common(top_n)
@@ -240,6 +276,51 @@ def _percentile(seq: list[int], p: float) -> int:
     return s[k]
 
 
+def _mean(seq):
+    return (sum(seq) / len(seq)) if seq else 0.0
+
+
+def _stdev(seq):
+    """Population standard deviation. 0 if <2 samples."""
+    if len(seq) < 2:
+        return 0.0
+    import math
+    m = _mean(seq)
+    return math.sqrt(sum((x - m) ** 2 for x in seq) / len(seq))
+
+
+def _hist_blocks(seq: list[int], n_bins: int = 16) -> str:
+    """Log-scaled response-time histogram as ▁▂▃▄▅▆▇█ block characters.
+    Buckets:  <30s · 30s-1m · 1-2m · 2-5m · 5-10m · 10-30m · 30m-1h · 1-2h ·
+              2-6h · 6-12h · 12-24h · 1-2d · 2-7d · >7d  (14 buckets)."""
+    if not seq:
+        return ""
+    # log-ish buckets in seconds
+    edges = [30, 60, 120, 300, 600, 1800, 3600, 7200,
+             21600, 43200, 86400, 172800, 604800]
+    bins = [0] * (len(edges) + 1)
+    for x in seq:
+        placed = False
+        for i, e in enumerate(edges):
+            if x < e:
+                bins[i] += 1
+                placed = True
+                break
+        if not placed:
+            bins[-1] += 1
+    blocks = " ▁▂▃▄▅▆▇█"
+    mx = max(bins) or 1
+    out = ""
+    for v in bins:
+        idx = min(len(blocks) - 1, max(0, round(v / mx * (len(blocks) - 1))))
+        out += blocks[idx]
+    return out
+
+
+def _hist_legend() -> str:
+    return "<30s 1m 2m 5m 10m 30m 1h 2h 6h 12h 1d 2d 7d >7d"
+
+
 def _response_table(title: str, rt: list[int], subtitle: str | None = None):
     from rich.box import ROUNDED
     from rich.table import Table
@@ -250,6 +331,8 @@ def _response_table(title: str, rt: list[int], subtitle: str | None = None):
     t.add_column("Value", justify="right", style="bright_white")
     if rt:
         t.add_row("Samples", f"{len(rt):,}")
+        t.add_row("Mean",    _fmt_dur(_mean(rt)))
+        t.add_row("Std dev", _fmt_dur(_stdev(rt)))
         t.add_row("Median",  _fmt_dur(_percentile(rt, 0.5)))
         t.add_row("p75",     _fmt_dur(_percentile(rt, 0.75)))
         t.add_row("p90",     _fmt_dur(_percentile(rt, 0.9)))
@@ -260,12 +343,25 @@ def _response_table(title: str, rt: list[int], subtitle: str | None = None):
     return t
 
 
+def _hist_panel(title: str, rt: list[int], color: str = "cyan"):
+    """Small panel showing the log-bucket histogram + bucket-label legend."""
+    from rich.console import Group
+    from rich.panel import Panel
+    from rich.text import Text
+    if not rt:
+        return Panel(Text("(no samples)", style="dim"), title=title,
+                     border_style="cyan", expand=False, padding=(0, 1))
+    body = Text(_hist_blocks(rt), style=color)
+    legend = Text(_hist_legend(), style="dim")
+    return Panel(Group(body, legend), title=title, border_style="cyan",
+                 expand=False, padding=(0, 1))
+
+
 def _render_daily_timeline(c: Counts, my_label: str, other_name: str):
     """Per-day stacked bar of message volume; auto-falls back to per-week for long ranges."""
     from datetime import date as _date
     from datetime import timedelta
 
-    from rich.console import Group
     from rich.panel import Panel
     from rich.table import Table
     from rich.text import Text
@@ -311,8 +407,18 @@ def _render_daily_timeline(c: Counts, my_label: str, other_name: str):
     t = Table.grid(padding=(0, 1))
     t.add_column(width=11, no_wrap=True)        # date / week-start
     t.add_column(width=bar_width + 2)            # stacked bar
-    t.add_column(width=10, justify="right")     # count
-    t.add_column(width=14, justify="right", style="dim")  # split
+    t.add_column(width=8, justify="right")      # total
+    t.add_column(width=10, justify="right", style="cyan")    # me count (matches bar color)
+    t.add_column(width=10, justify="right", style="magenta") # them count
+
+    # explicit header row so the colors are unambiguous
+    t.add_row(
+        Text("Date", style="bold"),
+        Text(f"  ◀ {my_label} (cyan)   |   {other_name} (magenta) ▶", style="dim"),
+        Text("total", style="bold"),
+        Text(my_label, style="bold cyan"),
+        Text(other_name, style="bold magenta"),
+    )
 
     for key, agg in buckets:
         total = agg["all"]
@@ -328,23 +434,148 @@ def _render_daily_timeline(c: Counts, my_label: str, other_name: str):
             bar.append("█" * me_cells, style="cyan")
             bar.append("█" * them_cells, style="magenta")
         t.add_row(
-            Text(key, style="cyan"),
+            Text(key, style="dim"),
             bar,
             Text(f"{total:,}" if total else "·",
                  style="bright_white" if total else "dim"),
-            Text(f"{me:,}/{them:,}" if total else "",
-                 style="dim"),
+            Text(f"{me:,}" if total else "",
+                 style="cyan" if me >= them else "dim cyan"),
+            Text(f"{them:,}" if total else "",
+                 style="magenta" if them > me else "dim magenta"),
         )
 
+    title = ("Daily timeline" if bucket == "day"
+             else "Weekly timeline (ISO week start; range too long for per-day)")
+    return Panel(t, title=title, border_style="cyan",
+                 expand=False, padding=(0, 1))
+
+
+def _render_chain_dynamics(c: Counts, my_label: str, other_name: str):
+    """Chain stats with std dev + per-chain word counts."""
+    from rich.box import ROUNDED
+    from rich.table import Table
+    t = Table(box=ROUNDED, show_header=True, header_style="bold cyan",
+              title="Chain dynamics", title_style="bold",
+              caption="a 'chain' = consecutive messages from the same sender "
+                      "(uninterrupted by the other)",
+              caption_style="dim italic")
+    t.add_column("Stat")
+    t.add_column(my_label, justify="right", style="bright_white")
+    t.add_column(other_name, justify="right", style="bright_white")
+
+    def _row(label: str, mine, theirs):
+        t.add_row(label, mine, theirs)
+
+    _row("Chains started",
+         f"{c.chain_starts_me:,}", f"{c.chain_starts_them:,}")
+
+    # message-count stats per chain
+    _row("Median chain msgs",
+         f"{_percentile(c.my_chain_lengths, 0.5)}",
+         f"{_percentile(c.their_chain_lengths, 0.5)}")
+    _row("Mean chain msgs",
+         f"{_mean(c.my_chain_lengths):.2f}",
+         f"{_mean(c.their_chain_lengths):.2f}")
+    _row("Std dev (msgs)",
+         f"{_stdev(c.my_chain_lengths):.2f}",
+         f"{_stdev(c.their_chain_lengths):.2f}")
+    _row("Longest chain (msgs)",
+         f"{max(c.my_chain_lengths, default=0)}",
+         f"{max(c.their_chain_lengths, default=0)}")
+    _row("Total msgs",
+         f"{sum(c.my_chain_lengths):,}",
+         f"{sum(c.their_chain_lengths):,}")
+    t.add_section()
+    # word-count stats per chain
+    _row("Median chain words",
+         f"{_percentile(c.my_chain_words, 0.5)}",
+         f"{_percentile(c.their_chain_words, 0.5)}")
+    _row("Mean chain words",
+         f"{_mean(c.my_chain_words):.1f}",
+         f"{_mean(c.their_chain_words):.1f}")
+    _row("Std dev (words)",
+         f"{_stdev(c.my_chain_words):.1f}",
+         f"{_stdev(c.their_chain_words):.1f}")
+    _row("Longest chain (words)",
+         f"{max(c.my_chain_words, default=0):,}",
+         f"{max(c.their_chain_words, default=0):,}")
+    _row("Total words",
+         f"{c.my_total_words:,}",
+         f"{c.their_total_words:,}")
+    return t
+
+
+def _split_bar(me: int, them: int, max_total: int, width: int = 50):
+    from rich.text import Text
+    bar = Text()
+    total = me + them
+    if total == 0 or max_total == 0:
+        return Text("·", style="dim")
+    cells = max(1, round(total / max_total * width))
+    me_cells = round(cells * me / total)
+    them_cells = max(0, cells - me_cells)
+    bar.append("█" * me_cells, style="cyan")
+    bar.append("█" * them_cells, style="magenta")
+    return bar
+
+
+def _stacked_panel(title: str, labels: list[str],
+                   me_counts: dict, them_counts: dict,
+                   my_label: str, other_name: str,
+                   label_width: int = 4):
+    """Per-bucket stacked-bar panel: cyan = me, magenta = them."""
+    from rich.console import Group
+    from rich.panel import Panel
+    from rich.table import Table
+    from rich.text import Text
+    t = Table.grid(padding=(0, 1))
+    t.add_column(width=label_width, no_wrap=True)
+    t.add_column(width=52)
+    t.add_column(width=12, justify="right", style="dim")
+    max_total = 0
+    for lab in labels:
+        # support int (hour) or int (weekday) keys mapped onto labels
+        key = lab if not lab.isdigit() else int(lab)
+        total = me_counts.get(key, 0) + them_counts.get(key, 0)
+        if total > max_total:
+            max_total = total
+    for lab in labels:
+        key = lab if not lab.isdigit() else int(lab)
+        me = me_counts.get(key, 0)
+        them = them_counts.get(key, 0)
+        bar = _split_bar(me, them, max_total, width=50)
+        t.add_row(
+            Text(str(lab), style="cyan"),
+            bar,
+            Text(f"{me:,}/{them:,}" if (me + them) else "·",
+                 style="dim"),
+        )
     legend = Text()
     legend.append("█", style="cyan")
     legend.append(f" {my_label}    ", style="dim")
     legend.append("█", style="magenta")
     legend.append(f" {other_name}", style="dim")
-
-    title = "Daily timeline" if bucket == "day" else "Weekly timeline (ISO week start; range too long for per-day)"
     return Panel(Group(t, legend), title=title, border_style="cyan",
                  expand=False, padding=(0, 1))
+
+
+def _media_table(c: Counts, my_label: str, other_name: str):
+    """Per-sender breakdown of message types (image / voice / video / call / etc.)."""
+    from rich.box import ROUNDED
+    from rich.table import Table
+    t = Table(box=ROUNDED, show_header=True, header_style="bold cyan",
+              title="Message types by sender", title_style="bold")
+    t.add_column("Type")
+    t.add_column(my_label, justify="right", style="cyan")
+    t.add_column(other_name, justify="right", style="magenta")
+    t.add_column("Total", justify="right", style="bright_white")
+    for typ in sorted(c.by_type.keys(), key=lambda k: -c.by_type[k]):
+        label = _TYPE_LABEL.get(typ, f"type:{typ}")
+        me = c.by_type_me.get(typ, 0)
+        them = c.by_type_them.get(typ, 0)
+        total = c.by_type.get(typ, 0)
+        t.add_row(label, f"{me:,}", f"{them:,}", f"{total:,}")
+    return t
 
 
 def render(c: Counts, contact: ContactRecord, my_label: str, console) -> None:
@@ -358,6 +589,8 @@ def render(c: Counts, contact: ContactRecord, my_label: str, console) -> None:
     if c.total == 0:
         console.print(Panel("No messages.", title="Stats", border_style="yellow"))
         return
+
+    other_name = contact.display_name
 
     # ── header ──────────────────────────────────────────────────────────────
     head = Table.grid(padding=(0, 2))
@@ -373,21 +606,8 @@ def render(c: Counts, contact: ContactRecord, my_label: str, console) -> None:
                               for s, n in c.by_sender.most_common())
     head.add_row("By sender", Text.from_markup(by_sender_str))
 
-    # ── types ───────────────────────────────────────────────────────────────
-    t_types = Table(box=ROUNDED, show_header=True, header_style="bold cyan",
-                    title="Message types", title_style="bold")
-    t_types.add_column("Type")
-    t_types.add_column("Count", justify="right")
-    t_types.add_column("Share", justify="right")
-    t_types.add_column("")
-    max_type = max(c.by_type.values()) if c.by_type else 0
-    for typ, n in sorted(c.by_type.items(), key=lambda kv: -kv[1]):
-        t_types.add_row(
-            _TYPE_LABEL.get(typ, f"type:{typ}"),
-            f"{n:,}",
-            f"{n / c.total * 100:.1f}%",
-            Text(_bar(n, max_type, width=25), style="cyan"),
-        )
+    # ── types (per-sender) ────────────────────────────────────────────────
+    t_types = _media_table(c, my_label, other_name)
 
     # ── monthly volume ──────────────────────────────────────────────────────
     t_months = Table(box=ROUNDED, show_header=True, header_style="bold cyan",
@@ -401,36 +621,22 @@ def render(c: Counts, contact: ContactRecord, my_label: str, console) -> None:
         t_months.add_row(month, f"{n:,}",
                          Text(_bar(n, max_month, width=40), style="green"))
 
-    # ── hourly heatmap ──────────────────────────────────────────────────────
-    t_hours = Table.grid(padding=(0, 1))
-    t_hours.add_column(width=4, no_wrap=True)
-    t_hours.add_column()
-    t_hours.add_column(width=8, justify="right")
-    max_hour = max(c.by_hour.values()) if c.by_hour else 0
-    for h in range(24):
-        n = c.by_hour.get(h, 0)
-        t_hours.add_row(
-            Text(f"{h:02d}h", style="cyan"),
-            Text(_bar(n, max_hour, width=50), style="magenta"),
-            Text(f"{n:,}", style="dim"),
-        )
-    hour_panel = Panel(t_hours, title="Activity by hour", border_style="cyan",
-                       padding=(0, 1), expand=False)
+    # ── hourly heatmap (stacked by sender) ────────────────────────────────
+    hour_labels = [f"{h:02d}h" for h in range(24)]
+    # _stacked_panel sees label-as-string; we pass int-keyed dicts → adapt
+    me_h = {f"{h:02d}h": c.by_hour_me.get(h, 0) for h in range(24)}
+    them_h = {f"{h:02d}h": c.by_hour_them.get(h, 0) for h in range(24)}
+    hour_panel = _stacked_panel("Activity by hour",
+                                hour_labels, me_h, them_h,
+                                my_label, other_name, label_width=4)
 
-    # ── weekday distribution ───────────────────────────────────────────────
-    t_dow = Table.grid(padding=(0, 1))
-    t_dow.add_column(width=4, no_wrap=True)
-    t_dow.add_column()
-    t_dow.add_column(width=8, justify="right")
-    days_label = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-    max_dow = max(c.by_weekday.values()) if c.by_weekday else 0
-    for i, label in enumerate(days_label):
-        n = c.by_weekday.get(i, 0)
-        t_dow.add_row(Text(label, style="cyan"),
-                      Text(_bar(n, max_dow, width=50), style="yellow"),
-                      Text(f"{n:,}", style="dim"))
-    dow_panel = Panel(t_dow, title="Activity by weekday", border_style="cyan",
-                      padding=(0, 1), expand=False)
+    # ── weekday distribution (stacked by sender) ──────────────────────────
+    dow_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    me_d = {dow_names[i]: c.by_weekday_me.get(i, 0) for i in range(7)}
+    them_d = {dow_names[i]: c.by_weekday_them.get(i, 0) for i in range(7)}
+    dow_panel = _stacked_panel("Activity by weekday",
+                               dow_names, me_d, them_d,
+                               my_label, other_name, label_width=4)
 
     # ── top emojis + top words ──────────────────────────────────────────────
     t_emoji = Table(box=ROUNDED, show_header=True, header_style="bold cyan",
@@ -447,44 +653,22 @@ def render(c: Counts, contact: ContactRecord, my_label: str, console) -> None:
     for w, n in c.top_words:
         t_words.add_row(w, f"{n:,}")
 
-    # ── chain dynamics ────────────────────────────────────────────────────
-    other_name = contact.display_name
-    t_chain = Table(box=ROUNDED, show_header=True, header_style="bold cyan",
-                    title="Chain dynamics",
-                    caption="a 'chain' = consecutive messages from the same sender (sent without the other speaking)",
-                    caption_style="dim italic", title_style="bold")
-    t_chain.add_column("Stat")
-    t_chain.add_column(my_label, justify="right", style="bright_white")
-    t_chain.add_column(other_name, justify="right", style="bright_white")
-    my_n = len(c.my_chain_lengths) or 1
-    their_n = len(c.their_chain_lengths) or 1
-    t_chain.add_row("Chains started",
-                    f"{c.chain_starts_me:,}",
-                    f"{c.chain_starts_them:,}")
-    t_chain.add_row("Median chain length",
-                    f"{_percentile(c.my_chain_lengths, 0.5)}",
-                    f"{_percentile(c.their_chain_lengths, 0.5)}")
-    t_chain.add_row("Mean chain length",
-                    f"{sum(c.my_chain_lengths) / my_n:.1f}",
-                    f"{sum(c.their_chain_lengths) / their_n:.1f}")
-    t_chain.add_row("Longest chain",
-                    f"{max(c.my_chain_lengths, default=0)}",
-                    f"{max(c.their_chain_lengths, default=0)}")
-    t_chain.add_row("Total msgs",
-                    f"{sum(c.my_chain_lengths):,}",
-                    f"{sum(c.their_chain_lengths):,}")
+    # ── chain dynamics (msgs + words, both with std dev) ──────────────────
+    t_chain = _render_chain_dynamics(c, my_label, other_name)
 
-    # ── bidirectional response time ──────────────────────────────────────────
-    # Convention: "X reply latency" = how long X took to send their first
-    # message after Y ended Y's previous chain. Chain-to-chain (first-to-first).
+    # ── bidirectional response time (table + log-histogram panel each) ────
     t_resp_mine = _response_table(
         f"{my_label} replies to {other_name}", c.response_time_seconds,
         subtitle=f"how long {my_label!r} takes to start replying after {other_name} sends",
     )
+    hist_mine = _hist_panel(f"{my_label} reply distribution",
+                            c.response_time_seconds, color="cyan")
     t_resp_their = _response_table(
         f"{other_name} replies to {my_label}", c.their_response_time_seconds,
         subtitle=f"how long {other_name!r} takes to start replying after {my_label} sends",
     )
+    hist_their = _hist_panel(f"{other_name} reply distribution",
+                             c.their_response_time_seconds, color="magenta")
 
     t_silence = Table(box=ROUNDED, show_header=True, header_style="bold cyan",
                       title="Silence", title_style="bold")
@@ -504,9 +688,178 @@ def render(c: Counts, contact: ContactRecord, my_label: str, console) -> None:
                  hour_panel, dow_panel, "",
                  t_emoji, t_words, "",
                  t_chain, "",
-                 t_resp_mine, t_resp_their, "",
+                 t_resp_mine, hist_mine,
+                 t_resp_their, hist_their, "",
                  t_silence)
     console.print()
     console.print(Panel(body, title=Text("Conversation stats", style="bold green"),
                         border_style="green", padding=(1, 2), expand=False))
+
+
+_HTML_FORMAT = """\
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>wxextract — conversation report</title>
+<style>
+{stylesheet}
+body {{ background: #0c1116; color: #e6edf3; font-family: ui-monospace, Menlo, monospace; margin: 0; padding: 0; }}
+.wrap {{ max-width: 1200px; margin: 0 auto; padding: 24px; }}
+.head {{ padding: 16px 24px; background: linear-gradient(90deg,#161b22,#0d1117); border-bottom: 1px solid #30363d; }}
+.head h1 {{ margin: 0 0 4px; font-size: 22px; color: #58a6ff; font-weight: 700; }}
+.head .meta {{ color: #8b949e; font-size: 13px; }}
+.toc {{ background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 16px 24px; margin: 24px 0; }}
+.toc h2 {{ margin: 0 0 12px; font-size: 16px; color: #d29922; }}
+.toc ul {{ margin: 0; padding-left: 20px; }}
+.toc li {{ margin: 4px 0; }}
+.toc a {{ color: #58a6ff; text-decoration: none; }}
+.toc a:hover {{ text-decoration: underline; }}
+.toc .count {{ color: #8b949e; font-size: 12px; }}
+.contact {{ margin: 32px 0; padding-top: 16px; border-top: 1px solid #30363d; }}
+.contact h2 {{ font-size: 18px; color: #58a6ff; margin: 0 0 4px; }}
+.contact .sub {{ color: #8b949e; font-size: 13px; margin-bottom: 12px; }}
+.top {{ color: #8b949e; font-size: 12px; }}
+.top a {{ color: #58a6ff; text-decoration: none; }}
+pre {{ font-family: {font_family}; font-size: {font_size}px;
+      background: transparent; color: #e6edf3; margin: 0;
+      overflow-x: auto; line-height: 1.25; }}
+</style>
+</head>
+<body>
+<div class="head">
+  <h1>wxextract — conversation report</h1>
+  <div class="meta">{generated}</div>
+</div>
+<div class="wrap">
+  <div class="toc">
+    <h2>Contacts</h2>
+    <ul>{toc}</ul>
+  </div>
+  {body}
+</div>
+</body>
+</html>
+"""
+
+
+def _slug(s: str) -> str:
+    keep = "".join(c if c.isalnum() else "-" for c in s)
+    return keep.strip("-").lower() or "contact"
+
+
+def render_html_report(
+    recs: list[ContactRecord],
+    plain_dbs: Path,
+    *,
+    my_wxid: str,
+    my_label: str = "Me",
+    top_n: int = 12,
+    min_messages: int = 200,
+    out_path: Path,
+    log=None,
+) -> int:
+    """Render a comprehensive HTML report across all contacts with ≥min_messages.
+
+    Returns the number of contacts written.
+    """
+    from rich.console import Console
+
+    from wxextract.messages import extract
+
+    def _log(msg: str):
+        if log is None:
+            return
+        if callable(log):
+            log(msg)
+        elif hasattr(log, "info"):
+            log.info(msg)
+
+    candidates = [r for r in recs if r.message_count is None or r.message_count >= min_messages]
+    candidates.sort(key=lambda r: -(r.message_count or 0))
+    if not candidates:
+        return 0
+
+    toc_items: list[str] = []
+    body_chunks: list[str] = []
+    written = 0
+    last_stylesheet: str | None = None
+    last_font: tuple[str, int] = ("ui-monospace, Menlo, monospace", 13)
+
+    for r in candidates:
+        _log(f"[stats] {r.display_name} ({r.alias or r.username})…")
+        try:
+            msgs = list(extract(r, my_wxid=my_wxid, skip_recalls=True))
+        except Exception as e:
+            _log(f"[stats]   skipped ({e!s})")
+            continue
+        if len(msgs) < min_messages:
+            continue
+        c = compute(msgs, r, my_label=my_label, top_n=top_n)
+        if c.total == 0:
+            continue
+        # render into a recording console (wide so panels don't wrap).
+        # file=StringIO so output goes to memory + record buffer, not stdout.
+        import io
+        rec = Console(record=True, width=140, force_terminal=True,
+                      color_system="truecolor", file=io.StringIO())
+        render(c, r, my_label, rec)
+        slug = _slug(r.alias or r.username)
+        # save_html=False/inline=True to get just the body fragment + stylesheet
+        # We use save_html() to get the full doc, then extract <pre> body so we can stitch them.
+        full = rec.export_html(inline_styles=False)
+        # Capture stylesheet from the first contact (rich emits a <style>…</style> with class colors)
+        style_block = ""
+        if "<style>" in full and "</style>" in full:
+            style_block = full.split("<style>", 1)[1].split("</style>", 1)[0]
+        if style_block:
+            last_stylesheet = style_block
+        # Capture the <pre> block
+        pre = full
+        if "<pre" in full:
+            pre = "<pre" + full.split("<pre", 1)[1].split("</pre>", 1)[0] + "</pre>"
+        # Capture font from inline style on <body> (rich emits font-family/size there)
+        body_tag = full.split("<body", 1)[1].split(">", 1)[0] if "<body" in full else ""
+        if 'font-family:' in body_tag:
+            fam = body_tag.split("font-family:", 1)[1].split(";", 1)[0].strip()
+            last_font = (fam, last_font[1])
+        if 'font-size:' in body_tag:
+            try:
+                sz = body_tag.split("font-size:", 1)[1].split("px", 1)[0].strip()
+                last_font = (last_font[0], int(float(sz)))
+            except Exception:
+                pass
+        # build sub-line
+        first = datetime.fromtimestamp(c.first_ts).date() if c.first_ts else ""
+        last = datetime.fromtimestamp(c.last_ts).date() if c.last_ts else ""
+        sub = f"{c.total:,} messages · {first} → {last} · {c.active_days} active days"
+        toc_items.append(
+            f'<li><a href="#{slug}">{r.display_name}</a> '
+            f'<span class="count">({c.total:,})</span></li>'
+        )
+        body_chunks.append(
+            f'<div class="contact" id="{slug}">'
+            f'<h2>{r.display_name}</h2>'
+            f'<div class="sub">{sub}</div>'
+            f'{pre}'
+            f'<div class="top"><a href="#top">↑ back to top</a></div>'
+            f'</div>'
+        )
+        written += 1
+        _log(f"[stats]   ok ({c.total:,} msgs)")
+
+    if written == 0:
+        return 0
+
+    fam, sz = last_font
+    html = _HTML_FORMAT.format(
+        stylesheet=last_stylesheet or "",
+        font_family=fam,
+        font_size=sz,
+        generated=datetime.now().strftime("Generated %Y-%m-%d %H:%M:%S"),
+        toc="\n".join(toc_items),
+        body="\n".join(body_chunks),
+    )
+    out_path.write_text(html, encoding="utf-8")
+    return written
 

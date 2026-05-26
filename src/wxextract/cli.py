@@ -250,15 +250,23 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("stats",
                         help="Per-contact analytics: timeline, hourly heatmap, top emojis/words, response times.",
-                        description="Compute and print conversation analytics for one contact. "
+                        description="Compute and print conversation analytics. With --alias, prints one "
+                                    "contact's panels to the terminal. Without --alias, renders a comprehensive "
+                                    "HTML report across all contacts above --min-messages. "
                                     "Uses the existing decrypted plain_dbs/ (run `wxextract run` first).",
                         formatter_class=Formatter)
-    sp.add_argument("--alias", required=True, metavar="WECHAT_ID",
-                    help="WeChat ID of the contact.")
+    sp.add_argument("--alias", metavar="WECHAT_ID",
+                    help="WeChat ID of the contact. Omit to render an HTML report across all contacts.")
     sp.add_argument("--my-label", default="Me", metavar="STR",
                     help="Label for your own messages. Default: %(default)s.")
     sp.add_argument("--top", type=int, default=12, metavar="N",
                     help="How many top emojis / words to show. Default: %(default)s.")
+    sp.add_argument("--min-messages", type=int, default=200, metavar="N",
+                    help="(HTML report) skip contacts with fewer than N messages. Default: %(default)s.")
+    sp.add_argument("--out", metavar="PATH",
+                    help="(HTML report) output path. Default: <workspace>/output/report.html.")
+    sp.add_argument("--open", action="store_true",
+                    help="(HTML report) open the generated file in $BROWSER after writing.")
 
     sp = sub.add_parser("preview",
                         help="Peek at the most-recent N messages of a contact, no files written.",
@@ -1292,7 +1300,7 @@ def _cmd_cleanup(args, workspace: Path, log) -> int:
 
 
 def _cmd_stats(args, workspace: Path, log) -> int:
-    """Print conversation analytics for one contact."""
+    """Print conversation analytics for one contact, or render an HTML report across all."""
     import shutil as _sh
 
     from rich.console import Console
@@ -1305,6 +1313,28 @@ def _cmd_stats(args, workspace: Path, log) -> int:
         print(f"[!] no plain_dbs at {plain}. Run `wxextract run` first.")
         return 2
     recs = load_contacts(plain)
+    my_wxid = _detect_my_wxid(workspace) or "wxid_unknown"
+
+    if not args.alias:
+        out = Path(args.out).expanduser().resolve() if args.out else (workspace / "output" / "report.html")
+        out.parent.mkdir(parents=True, exist_ok=True)
+        n = _stats.render_html_report(recs, plain, my_wxid=my_wxid,
+                                      my_label=args.my_label, top_n=args.top,
+                                      min_messages=args.min_messages, out_path=out,
+                                      log=log)
+        if n == 0:
+            print(f"[!] no contacts with ≥{args.min_messages} messages — nothing to render.")
+            return 2
+        print(f"[+] wrote HTML report for {n} contact(s) → {out}")
+        if args.open:
+            import subprocess
+            import webbrowser
+            try:
+                webbrowser.open(out.as_uri())
+            except Exception:
+                subprocess.Popen(["xdg-open", str(out)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return 0
+
     contact = find_by_alias(recs, args.alias)
     if contact is None:
         print(f"[!] alias {args.alias!r} not found")
@@ -1312,7 +1342,6 @@ def _cmd_stats(args, workspace: Path, log) -> int:
         if hint:
             print(hint)
         return 2
-    my_wxid = _detect_my_wxid(workspace) or "wxid_unknown"
     msgs = list(extract(contact, my_wxid=my_wxid, skip_recalls=True))
     counts = _stats.compute(msgs, contact, my_label=args.my_label, top_n=args.top)
     width = _sh.get_terminal_size((140, 24)).columns

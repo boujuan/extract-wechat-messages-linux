@@ -6,6 +6,47 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-05-26
+
+Stats v3 — deep analytics + comprehensive HTML report.
+
+### Added
+
+- **Std dev for chains & response times** — every distribution panel now
+  shows median + mean + std dev so you can read variability, not just
+  central tendency.
+- **Word counts per sender** — total words and per-chain word stats
+  (median / mean / std dev / longest / total), text-only (non-text msgs
+  contribute 0).
+- **Per-sender hour & weekday breakdown** — "Activity by hour" and
+  "Activity by weekday" are now stacked bars with cyan = you, magenta =
+  the other person, so you can see who's active when.
+- **Per-sender media counts** — new "Message types by sender" table
+  splits image / voice / video / sticker / call / appmsg counts between
+  the two participants (you can finally see who initiates calls).
+- **Reply-time histograms** — log-bucket sparkline panels next to each
+  reply-time table (30s · 1m · 2m · 5m · 10m · 30m · 1h · 2h · 6h · 12h
+  · 1d · 2d · 1w · >1w) make the response-time *shape* obvious at a
+  glance.
+- **HTML report** — `wxextract stats` (no `--alias`) now renders a
+  comprehensive HTML report across all contacts above `--min-messages`
+  (default 200) into `<workspace>/output/report.html`. Includes a
+  contact table-of-contents, per-contact anchors, and all panels in
+  full Rich-color via `Console.export_html()`. New flags:
+  `--min-messages`, `--out`, `--open`.
+
+### Fixed
+
+- **Daily timeline labels** — replaced the ambiguous "25/21" format with
+  explicit "Me" and "Rachel" columns plus a header row that maps the
+  bar colors to the participants.
+- **Reply-time direction labels** — "Me → Rachel" was ambiguous (does
+  it mean direction or responder?); now reads "Me replies to Rachel"
+  with an explicit subtitle.
+
+[Unreleased]: https://github.com/boujuan/extract-wechat-messages-linux/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/boujuan/extract-wechat-messages-linux/releases/tag/v0.3.0
+
 ## [0.2.0] - 2026-05-26
 
 Stats & polish release. Adds bidirectional analytics, daily timeline,
@@ -57,7 +98,6 @@ update notifier.
 - CHANGELOG follows Keep-a-Changelog format with full
   Added / Fixed / Documentation sections per release.
 
-[Unreleased]: https://github.com/boujuan/extract-wechat-messages-linux/compare/v0.2.0...HEAD
 [0.2.0]: https://github.com/boujuan/extract-wechat-messages-linux/releases/tag/v0.2.0
 
 ## [0.1.0] - 2026-05-26

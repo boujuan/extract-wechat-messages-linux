@@ -110,6 +110,7 @@ wxextract resnap                              # close WeChat → fresh snapshot 
 wxextract render --alias X                    # render without re-snapshotting
 wxextract preview --alias X --tail 20         # print last N messages, no files written
 wxextract stats   --alias X                   # per-contact analytics panel
+wxextract stats                               # HTML report for all contacts (≥200 msgs)
 wxextract images  --alias X                   # decrypt .dat image attachments
 wxextract run                                 # everything end-to-end (default)
 ```
