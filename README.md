@@ -112,6 +112,8 @@ wxextract preview --alias X --tail 20         # print last N messages, no files 
 wxextract stats   --alias X                   # per-contact analytics panel (terminal)
 wxextract stats   --alias X --html            # interactive HTML report for one contact
 wxextract stats                               # HTML report across all contacts (≥200 msgs)
+wxextract stats --whatsapp-json raquel.json --whatsapp-merge "Raquel=rachel_97213" \
+                --out ~/Documents/Raquel/Report/        # combined WeChat+WhatsApp report
 wxextract images  --alias X                   # decrypt .dat image attachments
 wxextract run                                 # everything end-to-end (default)
 ```

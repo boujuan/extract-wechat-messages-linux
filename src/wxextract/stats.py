@@ -15,6 +15,7 @@ from wxextract.messages import (
     TYPE_APPMSG,
     TYPE_CALL,
     TYPE_IMAGE,
+    TYPE_MEDIA_GENERIC,
     TYPE_STICKER,
     TYPE_SYSTEM,
     TYPE_TEXT,
@@ -98,6 +99,7 @@ _TYPE_LABEL = {
     TYPE_APPMSG: "appmsg",
     TYPE_CALL: "call",
     TYPE_SYSTEM: "system",
+    TYPE_MEDIA_GENERIC: "media",
 }
 
 

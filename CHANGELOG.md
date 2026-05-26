@@ -6,6 +6,68 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-05-26
+
+Cross-source comparison — WhatsApp conversations alongside WeChat ones
+in the same interactive HTML report.
+
+### Added
+
+- **`--whatsapp-json PATH`** on `wxextract stats` (repeatable) —
+  include a WhatsApp conversation parsed by Parse_Whatsapp_LLM's new
+  `--format wxextract` emitter. Each adds its own section in the
+  report with a `WhatsApp` badge.
+- **`--whatsapp-merge NAME=ALIAS`** (repeatable) — declare that a
+  WhatsApp contact and a WeChat alias are the same real-world person.
+  The report then emits three consecutive sections for them: a
+  **combined** synthetic view (messages from both sources, sorted by
+  timestamp, fed back through `stats.compute`), the WhatsApp-only
+  section, and the WeChat-only section.
+- **`--whatsapp-only`** — skip WeChat data loading entirely. Useful
+  for rendering reports from WhatsApp JSONs alone without a decrypted
+  WeChat snapshot present.
+- **`--out PATH` accepts a directory** — if PATH doesn't end with
+  `.html`, it's treated as an output directory (created if missing)
+  and `report.html` is written inside. Lets the user pass
+  `--out ~/Documents/Raquel/Report/` directly.
+- **Source badges** in the report — small coloured tags
+  (cyan WeChat / green WhatsApp / gold Combined) appear in each
+  contact's section subtitle.
+- **`src/wxextract/whatsapp.py`** — new module with
+  `load_whatsapp_json(path)` and `build_combined(a, b, …)`. The latter
+  produces the synthetic merged contact + re-numbered, re-sorted
+  message list with `sender_username` normalized so `stats.compute`'s
+  chain logic counts both sides correctly.
+- **`TYPE_MEDIA_GENERIC = 1001`** in `messages.py` — used by
+  WhatsApp's `<Media omitted>` since the txt export can't
+  disambiguate image / voice / video / sticker. Stats render it as
+  a single `media` bucket.
+- **`ContactRecord.source`** field (defaults to `"wechat"`) — drives
+  the report badge and is set to `"whatsapp"` / `"combined"` for the
+  new code paths.
+- **`tests/test_whatsapp.py`** — 5-test smoke suite covering load,
+  schema validation, compute over WhatsApp messages, single-source
+  HTML render, and merge.
+
+### Limitations (documented in --help and README)
+
+These come from WhatsApp's `.txt` export format itself:
+
+- No reply targets, no message IDs, no read receipts.
+- All attachments collapse to a single `media` bucket (image / voice
+  / video / sticker are indistinguishable in `.txt`).
+- Minute precision only (no seconds).
+- Edits are lossy (final text only); deletes are skipped.
+- 1-on-1 only — emitter rejects group chats with >2 senders.
+
+### Default behavior unchanged
+
+`wxextract stats` without any WhatsApp flag is identical to v0.4 —
+still WeChat-only, still writes to `<workspace>/output/report.html`.
+
+[Unreleased]: https://github.com/boujuan/extract-wechat-messages-linux/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/boujuan/extract-wechat-messages-linux/releases/tag/v0.5.0
+
 ## [0.4.0] - 2026-05-26
 
 Native interactive HTML report. The previous Rich-export approach
@@ -50,7 +112,6 @@ tables, and a sticky-nav sidebar.
   CLI flow is unchanged for callers; everything routes through the
   new `report.render_report_from_contacts`.
 
-[Unreleased]: https://github.com/boujuan/extract-wechat-messages-linux/compare/v0.4.0...HEAD
 [0.4.0]: https://github.com/boujuan/extract-wechat-messages-linux/releases/tag/v0.4.0
 
 ## [0.3.0] - 2026-05-26

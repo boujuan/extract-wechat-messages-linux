@@ -40,6 +40,8 @@ TYPE_STICKER = 47
 TYPE_APPMSG = 49
 TYPE_CALL = 50
 TYPE_SYSTEM = 10000
+TYPE_MEDIA_GENERIC = 1001   # used by non-WeChat sources (e.g. WhatsApp `<Media omitted>`)
+                            # when image/voice/video/sticker can't be disambiguated.
 
 # appmsg subtypes (high 32 bits of local_type when type==49)
 APPMSG_APPLET = 4

@@ -28,6 +28,9 @@ class ContactRecord:
     last_ts: int = 0
     message_db: Path | None = None
     message_table: str | None = None
+    # which data source this contact came from. Default "wechat" for
+    # backward-compat. Other values: "whatsapp", "combined".
+    source: str = "wechat"
 
     @property
     def display_name(self) -> str:

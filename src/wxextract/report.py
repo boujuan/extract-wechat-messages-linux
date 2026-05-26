@@ -567,7 +567,13 @@ def _render_contact(r: ContactRecord, c: Counts, my_label: str) -> str:
              f"{c.my_total_words:,} you · {c.their_total_words:,} other"),
     ])
 
-    sub = (f'{c.total:,} messages · '
+    source_label = {"wechat": "WeChat", "whatsapp": "WhatsApp",
+                    "combined": "Combined"}.get(r.source, r.source or "")
+    source_class = "src-" + (r.source or "wechat")
+    badge = (f'<span class="tag {source_class}">{html.escape(source_label)}</span> '
+             if source_label else '')
+    sub = (f'{badge}'
+           f'{c.total:,} messages · '
            f'{first.date() if first else ""} → {last.date() if last else ""} · '
            f'{c.active_days} active days · '
            f'<span class="tag">{html.escape(r.alias or r.username)}</span>')
@@ -854,7 +860,11 @@ table.data td.num, table.data th.num {
   font-size: 11px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
+  margin-right: 6px;
 }
+.tag.src-wechat   { background: rgba(34,211,238,0.15);  color: #22d3ee; }
+.tag.src-whatsapp { background: rgba(63,185,80,0.15);   color: #3fb950; }
+.tag.src-combined { background: rgba(210,153,34,0.15);  color: #d29922; }
 .callout {
   background: rgba(210,153,34,0.08);
   border: 1px solid rgba(210,153,34,0.4);
@@ -951,7 +961,8 @@ def render_report(
     if not contact_data:
         return 0
     _FIG_COUNTER[0] = 0   # reset id counter per render
-    contact_data = sorted(contact_data, key=lambda x: -x[1].total)
+    # Caller controls ordering — the multi-source CLI flow uses this to
+    # interleave merged + per-source sections in a specific order.
     is_multi = len(contact_data) > 1
     nav_items: list[str] = []
     sections: list[str] = []

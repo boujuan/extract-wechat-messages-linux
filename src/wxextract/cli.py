@@ -213,7 +213,8 @@ def build_parser() -> argparse.ArgumentParser:
     g_cat.add_argument("--plain-dbs", action="store_true",
                        help="The decrypted SQLite databases (~230 MB).")
     g_cat.add_argument("--output", action="store_true",
-                       help="Rendered conversation files (.txt / .xml / .jsonl / .md).")
+                       help="Rendered conversation files (.txt / .xml / .jsonl / .md) "
+                            "and the HTML report (report.html) under <workspace>/output/.")
     g_cat.add_argument("--media", action="store_true",
                        help="Decrypted .dat → .jpg/png/gif images.")
     g_cat.add_argument("--keys", action="store_true",
@@ -270,9 +271,24 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--min-messages", type=int, default=200, metavar="N",
                     help="(HTML report) skip contacts with fewer than N messages. Default: %(default)s.")
     sp.add_argument("--out", metavar="PATH",
-                    help="(HTML report) output path. Default: <workspace>/output/report.html.")
+                    help="(HTML report) output path. Default: <workspace>/output/report.html. "
+                         "If PATH doesn't end with .html, it's treated as a directory and "
+                         "report.html is written inside it (created if missing).")
     sp.add_argument("--open", action="store_true",
                     help="(HTML report) open the generated file in $BROWSER after writing.")
+    sp.add_argument("--whatsapp-json", action="append", default=[], metavar="PATH",
+                    help="Include a WhatsApp conversation alongside the WeChat data. PATH is "
+                         "a JSON file produced by Parse_Whatsapp_LLM with --format wxextract. "
+                         "Repeatable to include multiple WhatsApp contacts.")
+    sp.add_argument("--whatsapp-merge", action="append", default=[], metavar="NAME=ALIAS",
+                    help="Declare that the WhatsApp contact NAME and the WeChat ALIAS are the "
+                         "same person. The report then emits three sections per merge: a "
+                         "combined view, then the WhatsApp-only and WeChat-only views. "
+                         "Repeatable.")
+    sp.add_argument("--whatsapp-only", action="store_true",
+                    help="Skip WeChat data and render a report containing only the "
+                         "--whatsapp-json contacts. Useful for testing without a "
+                         "decrypted WeChat snapshot.")
 
     sp = sub.add_parser("preview",
                         help="Peek at the most-recent N messages of a contact, no files written.",
@@ -1305,66 +1321,221 @@ def _cmd_cleanup(args, workspace: Path, log) -> int:
     return 0
 
 
+def _resolve_report_out(out_str: str | None, workspace: Path) -> Path:
+    """Resolve --out into a concrete .html file path.
+
+    If unset → <workspace>/output/report.html.
+    If ends with `.html` → use as file.
+    Otherwise → treat as directory, append report.html, mkdir -p.
+    """
+    if not out_str:
+        out = workspace / "output" / "report.html"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        return out
+    p = Path(out_str).expanduser()
+    if p.suffix.lower() == ".html":
+        p.parent.mkdir(parents=True, exist_ok=True)
+        return p.resolve()
+    # directory mode
+    p.mkdir(parents=True, exist_ok=True)
+    return (p / "report.html").resolve()
+
+
+def _open_in_browser(path: Path) -> None:
+    import subprocess
+    import webbrowser
+    try:
+        webbrowser.open(path.as_uri())
+    except Exception:
+        subprocess.Popen(["xdg-open", str(path)],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
 def _cmd_stats(args, workspace: Path, log) -> int:
-    """Print conversation analytics for one contact (terminal), or render an HTML report."""
+    """Print conversation analytics for one contact (terminal), or render an HTML report.
+
+    Supports WeChat contacts (default), WhatsApp JSON files (via
+    --whatsapp-json, repeatable), and a merged "same person" view across
+    sources (via --whatsapp-merge NAME=ALIAS).
+    """
     import shutil as _sh
 
     from rich.console import Console
 
     from wxextract import report as _report
     from wxextract import stats as _stats
+    from wxextract import whatsapp as _wa
     from wxextract.contacts import find_by_alias, load_contacts
     from wxextract.messages import extract
-    plain = workspace / "plain_dbs"
-    if not plain.is_dir():
-        print(f"[!] no plain_dbs at {plain}. Run `wxextract run` first.")
-        return 2
-    recs = load_contacts(plain)
-    my_wxid = _detect_my_wxid(workspace) or "wxid_unknown"
 
-    # HTML mode: implied when --alias is missing, or when --html is set,
-    # or when --out is given.
-    html_mode = (not args.alias) or args.html or bool(args.out)
-
-    if html_mode:
-        out = (Path(args.out).expanduser().resolve() if args.out
-               else (workspace / "output" / "report.html"))
-        aliases = ([a.strip() for a in args.alias.split(",") if a.strip()]
-                   if args.alias else None)
-        n = _report.render_report_from_contacts(
-            recs, my_wxid=my_wxid, my_label=args.my_label, top_n=args.top,
-            min_messages=args.min_messages, aliases=aliases,
-            out_path=out, log=log)
-        if n == 0:
-            if aliases:
-                print(f"[!] none of {aliases} produced data — check the aliases.")
-            else:
-                print(f"[!] no contacts with ≥{args.min_messages} messages — nothing to render.")
+    # ── Validate --whatsapp-merge spec ──────────────────────────────
+    merge_specs: list[tuple[str, str]] = []
+    for spec in getattr(args, "whatsapp_merge", []) or []:
+        if "=" not in spec:
+            print(f"[!] --whatsapp-merge expects NAME=ALIAS, got {spec!r}")
             return 2
-        print(f"[+] wrote HTML report for {n} contact(s) → {out}")
-        if args.open:
-            import subprocess
-            import webbrowser
-            try:
-                webbrowser.open(out.as_uri())
-            except Exception:
-                subprocess.Popen(["xdg-open", str(out)],
-                                 stdout=subprocess.DEVNULL,
-                                 stderr=subprocess.DEVNULL)
+        name, alias = spec.split("=", 1)
+        merge_specs.append((name.strip(), alias.strip()))
+
+    whatsapp_paths = list(getattr(args, "whatsapp_json", []) or [])
+    whatsapp_only = bool(getattr(args, "whatsapp_only", False))
+
+    # ── HTML mode detection ─────────────────────────────────────────
+    html_mode = (not args.alias) or args.html or bool(args.out) \
+        or bool(whatsapp_paths) or whatsapp_only
+
+    # ── Single-contact terminal mode (no WhatsApp involvement) ──────
+    if not html_mode:
+        plain = workspace / "plain_dbs"
+        if not plain.is_dir():
+            print(f"[!] no plain_dbs at {plain}. Run `wxextract run` first.")
+            return 2
+        recs = load_contacts(plain)
+        my_wxid = _detect_my_wxid(workspace) or "wxid_unknown"
+        contact = find_by_alias(recs, args.alias)
+        if contact is None:
+            print(f"[!] alias {args.alias!r} not found")
+            hint = _suggest_alias(recs, args.alias)
+            if hint:
+                print(hint)
+            return 2
+        msgs = list(extract(contact, my_wxid=my_wxid, skip_recalls=True))
+        counts = _stats.compute(msgs, contact, my_label=args.my_label, top_n=args.top)
+        width = _sh.get_terminal_size((140, 24)).columns
+        _stats.render(counts, contact, args.my_label, Console(width=max(width, 120)))
         return 0
 
-    # Terminal mode: single contact, panels printed to stdout
-    contact = find_by_alias(recs, args.alias)
-    if contact is None:
-        print(f"[!] alias {args.alias!r} not found")
-        hint = _suggest_alias(recs, args.alias)
-        if hint:
-            print(hint)
+    # ── HTML mode: build the (ContactRecord, list[Message]) pairs ───
+    out = _resolve_report_out(args.out, workspace)
+    recs: list = []
+    my_wxid = "wxid_unknown"
+    if not whatsapp_only:
+        plain = workspace / "plain_dbs"
+        if not plain.is_dir():
+            print(f"[!] no plain_dbs at {plain}. "
+                  f"Run `wxextract run` first, or pass --whatsapp-only to skip WeChat.")
+            return 2
+        recs = load_contacts(plain)
+        my_wxid = _detect_my_wxid(workspace) or "wxid_unknown"
+
+    # Which WeChat contacts to include
+    aliases = ([a.strip() for a in args.alias.split(",") if a.strip()]
+               if args.alias else None)
+    if aliases is None:
+        wechat_targets = [r for r in recs if (r.message_count or 0) >= args.min_messages]
+        wechat_targets.sort(key=lambda r: -(r.message_count or 0))
+    else:
+        wechat_targets = []
+        for a in aliases:
+            r = find_by_alias(recs, a)
+            if r is None:
+                print(f"[!] alias {a!r} not found, skipping")
+            else:
+                wechat_targets.append(r)
+
+    def _log(msg: str):
+        if hasattr(log, "info"):
+            log.info(msg)
+        elif callable(log):
+            log(msg)
+        else:
+            print(msg)
+
+    # WeChat pairs (ContactRecord + raw messages)
+    wechat_pairs: list[tuple] = []
+    for r in wechat_targets:
+        _log(f"[stats] WeChat {r.display_name} ({r.alias or r.username})…")
+        try:
+            msgs = list(extract(r, my_wxid=my_wxid, skip_recalls=True))
+        except Exception as e:
+            _log(f"[stats]   skipped ({e!s})")
+            continue
+        if not msgs:
+            continue
+        wechat_pairs.append((r, msgs))
+
+    # WhatsApp pairs
+    whatsapp_pairs: list[tuple] = []
+    for p in whatsapp_paths:
+        wp = Path(p).expanduser()
+        if not wp.is_file():
+            print(f"[!] WhatsApp JSON not found: {wp}")
+            return 2
+        try:
+            wa_contact, wa_msgs, wa_my_label = _wa.load_whatsapp_json(wp)
+        except (ValueError, KeyError, json.JSONDecodeError) as e:
+            print(f"[!] failed to load {wp}: {e}")
+            return 2
+        _log(f"[stats] WhatsApp {wa_contact.display_name} "
+             f"({wa_my_label}'s side) — {len(wa_msgs):,} msgs")
+        whatsapp_pairs.append((wa_contact, wa_msgs))
+
+    # Apply merges: for each NAME=ALIAS spec, pull the matching pair out
+    # of each list and build a combined synthetic pair. Section order:
+    # combined → WhatsApp-only → WeChat-only (consecutive, per merge).
+    merged_groups: list[list[tuple]] = []   # each inner list is a section group
+    unmerged_wa = list(whatsapp_pairs)
+    unmerged_we = list(wechat_pairs)
+    for name, alias in merge_specs:
+        wa_match = next(
+            (pr for pr in unmerged_wa
+             if name.lower() in (pr[0].display_name or "").lower()
+             or name.lower() in (pr[0].alias or "").lower()),
+            None,
+        )
+        we_match = next(
+            (pr for pr in unmerged_we
+             if alias.lower() in (pr[0].alias or "").lower()
+             or alias.lower() in (pr[0].username or "").lower()),
+            None,
+        )
+        if wa_match is None or we_match is None:
+            print(f"[!] --whatsapp-merge {name}={alias}: "
+                  f"{'WhatsApp side ' if wa_match is None else ''}"
+                  f"{'WeChat side ' if we_match is None else ''}"
+                  f"not found, skipping merge.")
+            continue
+        unmerged_wa.remove(wa_match)
+        unmerged_we.remove(we_match)
+        combined_pair = _wa.build_combined(
+            wa_match, we_match,
+            display_name=we_match[0].display_name,
+            alias=f"{alias}_combined",
+        )
+        merged_groups.append([combined_pair, wa_match, we_match])
+
+    # Compute Counts for each pair (using a single my_label so the
+    # by_sender counter is consistent across sources)
+    def _to_counts(pair):
+        r, msgs = pair
+        c = _stats.compute(msgs, r, my_label=args.my_label, top_n=args.top)
+        return (r, c)
+
+    final_pairs: list[tuple] = []
+    for grp in merged_groups:
+        for p in grp:
+            cp = _to_counts(p)
+            if cp[1].total > 0:
+                final_pairs.append(cp)
+    for p in unmerged_wa:
+        cp = _to_counts(p)
+        if cp[1].total > 0:
+            final_pairs.append(cp)
+    for p in unmerged_we:
+        cp = _to_counts(p)
+        if cp[1].total > 0:
+            final_pairs.append(cp)
+
+    if not final_pairs:
+        print("[!] no data to render — check --alias / --whatsapp-json / --min-messages.")
         return 2
-    msgs = list(extract(contact, my_wxid=my_wxid, skip_recalls=True))
-    counts = _stats.compute(msgs, contact, my_label=args.my_label, top_n=args.top)
-    width = _sh.get_terminal_size((140, 24)).columns
-    _stats.render(counts, contact, args.my_label, Console(width=max(width, 120)))
+
+    n = _report.render_report(final_pairs,
+                              my_label=args.my_label,
+                              out_path=out)
+    print(f"[+] wrote HTML report for {n} contact section(s) → {out}")
+    if args.open:
+        _open_in_browser(out)
     return 0
 
 
