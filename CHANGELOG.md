@@ -6,6 +6,53 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-05-26
+
+Native interactive HTML report. The previous Rich-export approach
+("a screenshot of the terminal in HTML") is gone — replaced with a
+real native report built around Plotly.js, KPI cards, sortable
+tables, and a sticky-nav sidebar.
+
+### Added
+
+- **`wxextract/report.py`** — new module that emits a self-contained
+  dark-themed HTML report. Each contact section includes:
+  - KPI tiles (total / your-share / their-share / median replies /
+    longest silence / total words)
+  - Daily timeline with a range slider and 7-day rolling-average overlay
+  - Cumulative-messages area chart
+  - Combined weekday × hour activity heatmap, plus per-sender heatmaps
+  - Grouped hour-of-day + weekday bars (per sender)
+  - Monthly volume + message-type stacked bars
+  - Reply-latency histograms (log-bucketed, you vs other) +
+    full percentile table
+  - Chain-length box plots (messages and words, log y-axis)
+  - Chain dynamics + media count tables
+  - Top emojis + top words horizontal bars
+- **Multi-contact overview** — when no `--alias` is given, a leading
+  Overview section compares contacts: stacked bars of total messages
+  by sender, contact × month activity heatmap, and median-reply-time
+  bars on a log axis.
+- **Single-contact HTML mode** — `wxextract stats --alias X --html`
+  (or `--out path.html`) generates the report for one contact.
+  Comma-separated aliases work too: `--alias a,b,c --html`.
+- **Lazy figure rendering** — Plotly figures only initialize when
+  scrolled into view, so a report with dozens of charts still paints
+  the first screen instantly.
+- **Sticky-nav active-section highlighter** — the sidebar TOC tracks
+  scroll position and highlights the current contact.
+- **`hour_dow_me` / `hour_dow_them`** added to `Counts` so the
+  weekday × hour heatmaps can split by sender.
+
+### Removed
+
+- `stats.render_html_report` — the Rich `export_html()`-based report.
+  CLI flow is unchanged for callers; everything routes through the
+  new `report.render_report_from_contacts`.
+
+[Unreleased]: https://github.com/boujuan/extract-wechat-messages-linux/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/boujuan/extract-wechat-messages-linux/releases/tag/v0.4.0
+
 ## [0.3.0] - 2026-05-26
 
 Stats v3 — deep analytics + comprehensive HTML report.
@@ -44,7 +91,6 @@ Stats v3 — deep analytics + comprehensive HTML report.
   it mean direction or responder?); now reads "Me replies to Rachel"
   with an explicit subtitle.
 
-[Unreleased]: https://github.com/boujuan/extract-wechat-messages-linux/compare/v0.3.0...HEAD
 [0.3.0]: https://github.com/boujuan/extract-wechat-messages-linux/releases/tag/v0.3.0
 
 ## [0.2.0] - 2026-05-26

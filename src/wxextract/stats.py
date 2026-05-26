@@ -9,7 +9,6 @@ import re
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime
-from pathlib import Path
 
 from wxextract.contacts import ContactRecord
 from wxextract.messages import (
@@ -62,6 +61,9 @@ class Counts:
     by_hour: dict[int, int] = field(default_factory=Counter)         # 0..23
     by_hour_me:   dict[int, int] = field(default_factory=Counter)
     by_hour_them: dict[int, int] = field(default_factory=Counter)
+    # (weekday, hour) -> count, for activity heatmaps
+    hour_dow_me:   dict[tuple[int, int], int] = field(default_factory=Counter)
+    hour_dow_them: dict[tuple[int, int], int] = field(default_factory=Counter)
     top_emojis: list[tuple[str, int]] = field(default_factory=list)
     top_words: list[tuple[str, int]] = field(default_factory=list)
     response_time_seconds: list[int] = field(default_factory=list)        # me reply latency
@@ -159,12 +161,14 @@ def compute(messages: list[Message], contact: ContactRecord, my_label: str = "Me
             c.by_hour_me[dt.hour] += 1
             c.by_weekday_me[dt.weekday()] += 1
             c.by_type_me[m.type] += 1
+            c.hour_dow_me[(dt.weekday(), dt.hour)] += 1
             side = "me"
         elif m.sender_username == contact.username:
             daily_them[date_str] += 1
             c.by_hour_them[dt.hour] += 1
             c.by_weekday_them[dt.weekday()] += 1
             c.by_type_them[m.type] += 1
+            c.hour_dow_them[(dt.weekday(), dt.hour)] += 1
             side = "them"
 
         # word count for this message (text messages only — non-text is 0)
@@ -696,170 +700,4 @@ def render(c: Counts, contact: ContactRecord, my_label: str, console) -> None:
                         border_style="green", padding=(1, 2), expand=False))
 
 
-_HTML_FORMAT = """\
-<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<title>wxextract — conversation report</title>
-<style>
-{stylesheet}
-body {{ background: #0c1116; color: #e6edf3; font-family: ui-monospace, Menlo, monospace; margin: 0; padding: 0; }}
-.wrap {{ max-width: 1200px; margin: 0 auto; padding: 24px; }}
-.head {{ padding: 16px 24px; background: linear-gradient(90deg,#161b22,#0d1117); border-bottom: 1px solid #30363d; }}
-.head h1 {{ margin: 0 0 4px; font-size: 22px; color: #58a6ff; font-weight: 700; }}
-.head .meta {{ color: #8b949e; font-size: 13px; }}
-.toc {{ background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 16px 24px; margin: 24px 0; }}
-.toc h2 {{ margin: 0 0 12px; font-size: 16px; color: #d29922; }}
-.toc ul {{ margin: 0; padding-left: 20px; }}
-.toc li {{ margin: 4px 0; }}
-.toc a {{ color: #58a6ff; text-decoration: none; }}
-.toc a:hover {{ text-decoration: underline; }}
-.toc .count {{ color: #8b949e; font-size: 12px; }}
-.contact {{ margin: 32px 0; padding-top: 16px; border-top: 1px solid #30363d; }}
-.contact h2 {{ font-size: 18px; color: #58a6ff; margin: 0 0 4px; }}
-.contact .sub {{ color: #8b949e; font-size: 13px; margin-bottom: 12px; }}
-.top {{ color: #8b949e; font-size: 12px; }}
-.top a {{ color: #58a6ff; text-decoration: none; }}
-pre {{ font-family: {font_family}; font-size: {font_size}px;
-      background: transparent; color: #e6edf3; margin: 0;
-      overflow-x: auto; line-height: 1.25; }}
-</style>
-</head>
-<body>
-<div class="head">
-  <h1>wxextract — conversation report</h1>
-  <div class="meta">{generated}</div>
-</div>
-<div class="wrap">
-  <div class="toc">
-    <h2>Contacts</h2>
-    <ul>{toc}</ul>
-  </div>
-  {body}
-</div>
-</body>
-</html>
-"""
-
-
-def _slug(s: str) -> str:
-    keep = "".join(c if c.isalnum() else "-" for c in s)
-    return keep.strip("-").lower() or "contact"
-
-
-def render_html_report(
-    recs: list[ContactRecord],
-    plain_dbs: Path,
-    *,
-    my_wxid: str,
-    my_label: str = "Me",
-    top_n: int = 12,
-    min_messages: int = 200,
-    out_path: Path,
-    log=None,
-) -> int:
-    """Render a comprehensive HTML report across all contacts with ≥min_messages.
-
-    Returns the number of contacts written.
-    """
-    from rich.console import Console
-
-    from wxextract.messages import extract
-
-    def _log(msg: str):
-        if log is None:
-            return
-        if callable(log):
-            log(msg)
-        elif hasattr(log, "info"):
-            log.info(msg)
-
-    candidates = [r for r in recs if r.message_count is None or r.message_count >= min_messages]
-    candidates.sort(key=lambda r: -(r.message_count or 0))
-    if not candidates:
-        return 0
-
-    toc_items: list[str] = []
-    body_chunks: list[str] = []
-    written = 0
-    last_stylesheet: str | None = None
-    last_font: tuple[str, int] = ("ui-monospace, Menlo, monospace", 13)
-
-    for r in candidates:
-        _log(f"[stats] {r.display_name} ({r.alias or r.username})…")
-        try:
-            msgs = list(extract(r, my_wxid=my_wxid, skip_recalls=True))
-        except Exception as e:
-            _log(f"[stats]   skipped ({e!s})")
-            continue
-        if len(msgs) < min_messages:
-            continue
-        c = compute(msgs, r, my_label=my_label, top_n=top_n)
-        if c.total == 0:
-            continue
-        # render into a recording console (wide so panels don't wrap).
-        # file=StringIO so output goes to memory + record buffer, not stdout.
-        import io
-        rec = Console(record=True, width=140, force_terminal=True,
-                      color_system="truecolor", file=io.StringIO())
-        render(c, r, my_label, rec)
-        slug = _slug(r.alias or r.username)
-        # save_html=False/inline=True to get just the body fragment + stylesheet
-        # We use save_html() to get the full doc, then extract <pre> body so we can stitch them.
-        full = rec.export_html(inline_styles=False)
-        # Capture stylesheet from the first contact (rich emits a <style>…</style> with class colors)
-        style_block = ""
-        if "<style>" in full and "</style>" in full:
-            style_block = full.split("<style>", 1)[1].split("</style>", 1)[0]
-        if style_block:
-            last_stylesheet = style_block
-        # Capture the <pre> block
-        pre = full
-        if "<pre" in full:
-            pre = "<pre" + full.split("<pre", 1)[1].split("</pre>", 1)[0] + "</pre>"
-        # Capture font from inline style on <body> (rich emits font-family/size there)
-        body_tag = full.split("<body", 1)[1].split(">", 1)[0] if "<body" in full else ""
-        if 'font-family:' in body_tag:
-            fam = body_tag.split("font-family:", 1)[1].split(";", 1)[0].strip()
-            last_font = (fam, last_font[1])
-        if 'font-size:' in body_tag:
-            try:
-                sz = body_tag.split("font-size:", 1)[1].split("px", 1)[0].strip()
-                last_font = (last_font[0], int(float(sz)))
-            except Exception:
-                pass
-        # build sub-line
-        first = datetime.fromtimestamp(c.first_ts).date() if c.first_ts else ""
-        last = datetime.fromtimestamp(c.last_ts).date() if c.last_ts else ""
-        sub = f"{c.total:,} messages · {first} → {last} · {c.active_days} active days"
-        toc_items.append(
-            f'<li><a href="#{slug}">{r.display_name}</a> '
-            f'<span class="count">({c.total:,})</span></li>'
-        )
-        body_chunks.append(
-            f'<div class="contact" id="{slug}">'
-            f'<h2>{r.display_name}</h2>'
-            f'<div class="sub">{sub}</div>'
-            f'{pre}'
-            f'<div class="top"><a href="#top">↑ back to top</a></div>'
-            f'</div>'
-        )
-        written += 1
-        _log(f"[stats]   ok ({c.total:,} msgs)")
-
-    if written == 0:
-        return 0
-
-    fam, sz = last_font
-    html = _HTML_FORMAT.format(
-        stylesheet=last_stylesheet or "",
-        font_family=fam,
-        font_size=sz,
-        generated=datetime.now().strftime("Generated %Y-%m-%d %H:%M:%S"),
-        toc="\n".join(toc_items),
-        body="\n".join(body_chunks),
-    )
-    out_path.write_text(html, encoding="utf-8")
-    return written
 

@@ -251,16 +251,22 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("stats",
                         help="Per-contact analytics: timeline, hourly heatmap, top emojis/words, response times.",
                         description="Compute and print conversation analytics. With --alias, prints one "
-                                    "contact's panels to the terminal. Without --alias, renders a comprehensive "
-                                    "HTML report across all contacts above --min-messages. "
+                                    "contact's panels to the terminal. With --html (or no --alias), renders "
+                                    "a native interactive HTML report with Plotly charts: KPI cards, daily "
+                                    "timeline, weekday×hour heatmaps, per-sender bars, reply-time histograms, "
+                                    "chain box plots, and tables. "
                                     "Uses the existing decrypted plain_dbs/ (run `wxextract run` first).",
                         formatter_class=Formatter)
     sp.add_argument("--alias", metavar="WECHAT_ID",
-                    help="WeChat ID of the contact. Omit to render an HTML report across all contacts.")
+                    help="WeChat ID of the contact. Comma list works too (a,b,c). "
+                         "Omit to include every contact above --min-messages.")
     sp.add_argument("--my-label", default="Me", metavar="STR",
                     help="Label for your own messages. Default: %(default)s.")
     sp.add_argument("--top", type=int, default=12, metavar="N",
                     help="How many top emojis / words to show. Default: %(default)s.")
+    sp.add_argument("--html", action="store_true",
+                    help="Generate an interactive HTML report instead of terminal output. "
+                         "Implied when --alias is omitted.")
     sp.add_argument("--min-messages", type=int, default=200, metavar="N",
                     help="(HTML report) skip contacts with fewer than N messages. Default: %(default)s.")
     sp.add_argument("--out", metavar="PATH",
@@ -1300,11 +1306,12 @@ def _cmd_cleanup(args, workspace: Path, log) -> int:
 
 
 def _cmd_stats(args, workspace: Path, log) -> int:
-    """Print conversation analytics for one contact, or render an HTML report across all."""
+    """Print conversation analytics for one contact (terminal), or render an HTML report."""
     import shutil as _sh
 
     from rich.console import Console
 
+    from wxextract import report as _report
     from wxextract import stats as _stats
     from wxextract.contacts import find_by_alias, load_contacts
     from wxextract.messages import extract
@@ -1315,15 +1322,24 @@ def _cmd_stats(args, workspace: Path, log) -> int:
     recs = load_contacts(plain)
     my_wxid = _detect_my_wxid(workspace) or "wxid_unknown"
 
-    if not args.alias:
-        out = Path(args.out).expanduser().resolve() if args.out else (workspace / "output" / "report.html")
-        out.parent.mkdir(parents=True, exist_ok=True)
-        n = _stats.render_html_report(recs, plain, my_wxid=my_wxid,
-                                      my_label=args.my_label, top_n=args.top,
-                                      min_messages=args.min_messages, out_path=out,
-                                      log=log)
+    # HTML mode: implied when --alias is missing, or when --html is set,
+    # or when --out is given.
+    html_mode = (not args.alias) or args.html or bool(args.out)
+
+    if html_mode:
+        out = (Path(args.out).expanduser().resolve() if args.out
+               else (workspace / "output" / "report.html"))
+        aliases = ([a.strip() for a in args.alias.split(",") if a.strip()]
+                   if args.alias else None)
+        n = _report.render_report_from_contacts(
+            recs, my_wxid=my_wxid, my_label=args.my_label, top_n=args.top,
+            min_messages=args.min_messages, aliases=aliases,
+            out_path=out, log=log)
         if n == 0:
-            print(f"[!] no contacts with ≥{args.min_messages} messages — nothing to render.")
+            if aliases:
+                print(f"[!] none of {aliases} produced data — check the aliases.")
+            else:
+                print(f"[!] no contacts with ≥{args.min_messages} messages — nothing to render.")
             return 2
         print(f"[+] wrote HTML report for {n} contact(s) → {out}")
         if args.open:
@@ -1332,9 +1348,12 @@ def _cmd_stats(args, workspace: Path, log) -> int:
             try:
                 webbrowser.open(out.as_uri())
             except Exception:
-                subprocess.Popen(["xdg-open", str(out)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                subprocess.Popen(["xdg-open", str(out)],
+                                 stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL)
         return 0
 
+    # Terminal mode: single contact, panels printed to stdout
     contact = find_by_alias(recs, args.alias)
     if contact is None:
         print(f"[!] alias {args.alias!r} not found")
