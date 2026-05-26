@@ -179,6 +179,18 @@ def build_parser() -> argparse.ArgumentParser:
     g_resnap.add_argument("--no-relaunch", action="store_true",
                           help="Don't re-launch WeChat afterwards (avoids the login-confirm dialog).")
 
+    sp = sub.add_parser("stats",
+                        help="Per-contact analytics: timeline, hourly heatmap, top emojis/words, response times.",
+                        description="Compute and print conversation analytics for one contact. "
+                                    "Uses the existing decrypted plain_dbs/ (run `wxextract run` first).",
+                        formatter_class=Formatter)
+    sp.add_argument("--alias", required=True, metavar="WECHAT_ID",
+                    help="WeChat ID of the contact.")
+    sp.add_argument("--my-label", default="Me", metavar="STR",
+                    help="Label for your own messages. Default: %(default)s.")
+    sp.add_argument("--top", type=int, default=12, metavar="N",
+                    help="How many top emojis / words to show. Default: %(default)s.")
+
     sp = sub.add_parser("preview",
                         help="Peek at the most-recent N messages of a contact, no files written.",
                         description="Print the last N messages of a contact straight to stdout; "
@@ -285,6 +297,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_render(args, workspace, log, ui=ui)
         if cmd == "preview":
             return _cmd_preview(args, workspace, log)
+        if cmd == "stats":
+            return _cmd_stats(args, workspace, log)
         if cmd == "run":
             return _cmd_run(args, workspace, log, ui=ui)
         parser.print_help()
@@ -893,6 +907,35 @@ def _print_summary_with_range(contact, message_count, recall_count, first_dt, la
 def _is_recall_msg(m) -> bool:
     from wxextract.messages import _is_recall
     return _is_recall(m.type, m.content)
+
+
+def _cmd_stats(args, workspace: Path, log) -> int:
+    """Print conversation analytics for one contact."""
+    import shutil as _sh
+
+    from rich.console import Console
+
+    from wxextract import stats as _stats
+    from wxextract.contacts import find_by_alias, load_contacts
+    from wxextract.messages import extract
+    plain = workspace / "plain_dbs"
+    if not plain.is_dir():
+        print(f"[!] no plain_dbs at {plain}. Run `wxextract run` first.")
+        return 2
+    recs = load_contacts(plain)
+    contact = find_by_alias(recs, args.alias)
+    if contact is None:
+        print(f"[!] alias {args.alias!r} not found")
+        hint = _suggest_alias(recs, args.alias)
+        if hint:
+            print(hint)
+        return 2
+    my_wxid = _detect_my_wxid(workspace) or "wxid_unknown"
+    msgs = list(extract(contact, my_wxid=my_wxid, skip_recalls=True))
+    counts = _stats.compute(msgs, contact, my_label=args.my_label, top_n=args.top)
+    width = _sh.get_terminal_size((140, 24)).columns
+    _stats.render(counts, contact, args.my_label, Console(width=max(width, 120)))
+    return 0
 
 
 def _cmd_preview(args, workspace: Path, log) -> int:
