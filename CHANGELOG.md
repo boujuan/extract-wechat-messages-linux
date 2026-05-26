@@ -6,6 +6,48 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-05-26
+
+Trend plots over time + daily timeline metric toggle + overview
+double-counting fix.
+
+### Added
+
+- **Reply-latency over time** chart per contact — 14-day rolling
+  average of reply latency, plotted on a log-scale y-axis with two
+  lines (you / other). Makes drift in responsiveness obvious at a
+  glance ("we used to reply in minutes; now we both take hours").
+- **Burst-size over time** chart per contact — 14-day rolling average
+  of chain length (messages per uninterrupted turn). Higher = more
+  monologue-like; lower = more back-and-forth.
+- **Daily timeline messages/words toggle** — the top-of-section daily
+  bar chart now has a Messages / Words button group (Plotly
+  `updatemenus`) that swaps all three traces (yours, other's, 7-day
+  avg) between message count and word count without re-rendering.
+
+### Fixed
+
+- **Overview no longer double-counts merged contacts**. When
+  `--whatsapp-merge` produces three sections for one person
+  (combined + WhatsApp + WeChat), the Overview KPIs and bar/heatmap
+  charts now only include the combined entry — totals are unique
+  conversations, not 3× the truth. Per-contact sections still show
+  their individual numbers.
+
+### Internal
+
+- `Counts` gains timestamped sample arrays for the trend plots
+  (`my_reply_times_ts`, `their_reply_times_ts`, `my_chain_sizes_ts`,
+  `their_chain_sizes_ts`) plus `daily_words_me` / `daily_words_them`
+  for the toggle. Memory cost: O(num_chain_switches) per contact,
+  trivial.
+- `report.render_report()` gains an optional `overview_data`
+  parameter so the caller can pass a deduped subset for the
+  cross-contact aggregate when merges are active.
+
+[Unreleased]: https://github.com/boujuan/extract-wechat-messages-linux/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/boujuan/extract-wechat-messages-linux/releases/tag/v0.6.0
+
 ## [0.5.0] - 2026-05-26
 
 Cross-source comparison — WhatsApp conversations alongside WeChat ones
@@ -65,7 +107,6 @@ These come from WhatsApp's `.txt` export format itself:
 `wxextract stats` without any WhatsApp flag is identical to v0.4 —
 still WeChat-only, still writes to `<workspace>/output/report.html`.
 
-[Unreleased]: https://github.com/boujuan/extract-wechat-messages-linux/compare/v0.5.0...HEAD
 [0.5.0]: https://github.com/boujuan/extract-wechat-messages-linux/releases/tag/v0.5.0
 
 ## [0.4.0] - 2026-05-26

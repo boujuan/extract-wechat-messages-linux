@@ -93,32 +93,147 @@ def _fig_monthly(c: Counts) -> dict:
     }
 
 
+def _roll_mean(seq: list[float], window: int) -> list[float]:
+    """Trailing window mean — out[i] = mean(seq[max(0,i-window+1):i+1])."""
+    out: list[float] = []
+    win: list[float] = []
+    for v in seq:
+        win.append(v)
+        if len(win) > window:
+            win.pop(0)
+        out.append(sum(win) / len(win))
+    return out
+
+
 def _fig_daily(c: Counts) -> dict:
+    """Daily timeline with a Messages/Words toggle.
+
+    Six traces total: 3 for messages (you, other, 7-day avg total) and 3
+    for words. A Plotly `updatemenus` button swaps visibility + y-axis
+    title between the two metrics.
+    """
     dates = sorted(c.daily_counts.keys())
     if not dates:
         return None
-    me = [c.daily_me.get(d, 0) for d in dates]
-    them = [c.daily_them.get(d, 0) for d in dates]
-    total = [a + b for a, b in zip(me, them, strict=False)]
-    roll, win = [], []
-    for v in total:
-        win.append(v)
-        if len(win) > 7:
-            win.pop(0)
-        roll.append(sum(win) / len(win))
-    lay = _layout(height=380, barmode="stack", hovermode="x unified")
+    me_msgs = [c.daily_me.get(d, 0) for d in dates]
+    them_msgs = [c.daily_them.get(d, 0) for d in dates]
+    me_words = [c.daily_words_me.get(d, 0) for d in dates]
+    them_words = [c.daily_words_them.get(d, 0) for d in dates]
+    msg_roll = _roll_mean(
+        [a + b for a, b in zip(me_msgs, them_msgs, strict=False)], 7)
+    word_roll = _roll_mean(
+        [a + b for a, b in zip(me_words, them_words, strict=False)], 7)
+
+    lay = _layout(height=420, barmode="stack", hovermode="x unified")
     lay["xaxis"]["type"] = "date"
     lay["xaxis"]["rangeslider"] = {"visible": True, "thickness": 0.06,
                                    "bgcolor": _PAL["surface"]}
     lay["yaxis"]["title"] = "messages / day"
+    lay["margin"] = {"l": 60, "r": 24, "t": 50, "b": 50}
+    lay["updatemenus"] = [{
+        "type": "buttons",
+        "direction": "right",
+        "x": 0.0, "xanchor": "left",
+        "y": 1.15, "yanchor": "top",
+        "bgcolor": _PAL["surface"],
+        "bordercolor": _PAL["border"],
+        "font": {"color": _PAL["text"], "size": 11},
+        "active": 0,
+        "buttons": [
+            {"label": "Messages", "method": "update",
+             "args": [{"visible": [True, True, True, False, False, False]},
+                      {"yaxis.title.text": "messages / day"}]},
+            {"label": "Words", "method": "update",
+             "args": [{"visible": [False, False, False, True, True, True]},
+                      {"yaxis.title.text": "words / day"}]},
+        ],
+    }]
     return {
         "data": [
-            {"type": "bar", "x": dates, "y": me, "name": "You",
-             "marker": {"color": _PAL["me"]}},
-            {"type": "bar", "x": dates, "y": them, "name": "Other",
-             "marker": {"color": _PAL["them"]}},
-            {"type": "scatter", "x": dates, "y": roll, "name": "7-day avg",
-             "mode": "lines", "line": {"color": _PAL["warn"], "width": 2}},
+            # Messages traces (visible by default)
+            {"type": "bar", "x": dates, "y": me_msgs, "name": "You",
+             "marker": {"color": _PAL["me"]},
+             "legendgroup": "msgs", "visible": True},
+            {"type": "bar", "x": dates, "y": them_msgs, "name": "Other",
+             "marker": {"color": _PAL["them"]},
+             "legendgroup": "msgs", "visible": True},
+            {"type": "scatter", "x": dates, "y": msg_roll, "name": "7-day avg",
+             "mode": "lines", "line": {"color": _PAL["warn"], "width": 2},
+             "legendgroup": "msgs", "visible": True},
+            # Words traces (hidden until toggled)
+            {"type": "bar", "x": dates, "y": me_words, "name": "You (words)",
+             "marker": {"color": _PAL["me"]},
+             "legendgroup": "words", "visible": False},
+            {"type": "bar", "x": dates, "y": them_words, "name": "Other (words)",
+             "marker": {"color": _PAL["them"]},
+             "legendgroup": "words", "visible": False},
+            {"type": "scatter", "x": dates, "y": word_roll, "name": "7-day avg (words)",
+             "mode": "lines", "line": {"color": _PAL["warn"], "width": 2},
+             "legendgroup": "words", "visible": False},
+        ],
+        "layout": lay,
+    }
+
+
+def _bucket_daily(samples: list[tuple[int, int]]) -> tuple[list[str], list[float]]:
+    """Group (ts_seconds, value) samples by date and return (dates, daily_means)."""
+    if not samples:
+        return [], []
+    from collections import defaultdict as _dd
+    bucket: dict[str, list[int]] = _dd(list)
+    for ts, v in samples:
+        d = datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
+        bucket[d].append(v)
+    dates = sorted(bucket.keys())
+    return dates, [sum(bucket[d]) / len(bucket[d]) for d in dates]
+
+
+def _fig_reply_time_over_time(c: Counts) -> dict:
+    me_d, me_v = _bucket_daily(c.my_reply_times_ts)
+    them_d, them_v = _bucket_daily(c.their_reply_times_ts)
+    if not me_v and not them_v:
+        return None
+    win = 14
+    me_roll = _roll_mean(me_v, win)
+    them_roll = _roll_mean(them_v, win)
+    lay = _layout(height=320, hovermode="x unified")
+    lay["xaxis"]["type"] = "date"
+    lay["yaxis"]["type"] = "log"
+    lay["yaxis"]["title"] = "reply latency (s, log)"
+    lay["yaxis"]["tickvals"] = [10, 60, 600, 3600, 86400]
+    lay["yaxis"]["ticktext"] = ["10s", "1m", "10m", "1h", "1d"]
+    return {
+        "data": [
+            {"type": "scatter", "x": me_d, "y": me_roll,
+             "name": "You reply (14d avg)",
+             "mode": "lines", "line": {"color": _PAL["me"], "width": 2}},
+            {"type": "scatter", "x": them_d, "y": them_roll,
+             "name": "Other replies (14d avg)",
+             "mode": "lines", "line": {"color": _PAL["them"], "width": 2}},
+        ],
+        "layout": lay,
+    }
+
+
+def _fig_burst_size_over_time(c: Counts) -> dict:
+    me_d, me_v = _bucket_daily(c.my_chain_sizes_ts)
+    them_d, them_v = _bucket_daily(c.their_chain_sizes_ts)
+    if not me_v and not them_v:
+        return None
+    win = 14
+    me_roll = _roll_mean(me_v, win)
+    them_roll = _roll_mean(them_v, win)
+    lay = _layout(height=320, hovermode="x unified")
+    lay["xaxis"]["type"] = "date"
+    lay["yaxis"]["title"] = "avg burst size (msgs/chain)"
+    return {
+        "data": [
+            {"type": "scatter", "x": me_d, "y": me_roll,
+             "name": "Your bursts (14d avg)",
+             "mode": "lines", "line": {"color": _PAL["me"], "width": 2}},
+            {"type": "scatter", "x": them_d, "y": them_roll,
+             "name": "Their bursts (14d avg)",
+             "mode": "lines", "line": {"color": _PAL["them"], "width": 2}},
         ],
         "layout": lay,
     }
@@ -584,10 +699,22 @@ def _render_contact(r: ContactRecord, c: Counts, my_label: str) -> str:
         f'<div class="section-sub">{sub}</div>',
         f'<div class="kpis">{kpis}</div>',
         _figure_block("Daily timeline", _fig_daily(c), full=True,
-                      sub="Stacked bars: messages per day, split by sender. "
-                          "Line: 7-day rolling average of the total."),
+                      sub="Stacked bars per day, split by sender. Line: 7-day rolling "
+                          "average of the total. Toggle the buttons (top-left) to swap "
+                          "between message count and word count."),
         _figure_block("Cumulative messages", _fig_cumulative(c), full=True,
                       sub="Running total over time — see growth and plateaus at a glance"),
+        '<div class="grid cols-2">',
+        _figure_block("Reply latency over time",
+                      _fig_reply_time_over_time(c),
+                      sub="14-day rolling average of reply latency, per sender. "
+                          "Falling line = becoming more responsive over time."),
+        _figure_block("Burst size over time",
+                      _fig_burst_size_over_time(c),
+                      sub="14-day rolling average of chain length (messages per "
+                          "uninterrupted turn). Higher = more monologue-like; "
+                          "lower = more back-and-forth."),
+        '</div>',
         _figure_block("Weekday × hour activity heatmap (combined)",
                       _fig_heatmap_hour_dow(c, "both"), full=True,
                       sub="When are you two most active together?"),
@@ -956,19 +1083,29 @@ def render_report(
     my_label: str = "Me",
     out_path: Path,
     title: str | None = None,
+    overview_data: list[tuple[ContactRecord, Counts]] | None = None,
 ) -> int:
-    """Render an HTML report. Returns the number of contacts written."""
+    """Render an HTML report. Returns the number of contacts written.
+
+    `overview_data` lets the caller control which pairs feed the
+    overview aggregates (KPIs, comparison charts). Useful when
+    `contact_data` contains merged + per-source duplicates of the same
+    real-world contact (a "combined" view plus its component sources)
+    — passing only the combined + unmerged entries via `overview_data`
+    keeps the overview totals from double-counting.
+    """
     if not contact_data:
         return 0
     _FIG_COUNTER[0] = 0   # reset id counter per render
     # Caller controls ordering — the multi-source CLI flow uses this to
     # interleave merged + per-source sections in a specific order.
     is_multi = len(contact_data) > 1
+    ov_data = overview_data if overview_data is not None else contact_data
     nav_items: list[str] = []
     sections: list[str] = []
     if is_multi:
         nav_items.append('<a href="#overview">Overview</a>')
-        sections.append(_render_overview(contact_data, my_label))
+        sections.append(_render_overview(ov_data, my_label))
     for r, c in contact_data:
         sid = _slug(r.alias or r.username)
         nav_items.append(

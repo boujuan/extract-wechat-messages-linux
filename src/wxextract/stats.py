@@ -77,6 +77,14 @@ class Counts:
     daily_counts: dict[str, int] = field(default_factory=dict)       # "2026-04-09" → total
     daily_me:     dict[str, int] = field(default_factory=dict)
     daily_them:   dict[str, int] = field(default_factory=dict)
+    daily_words_me:   dict[str, int] = field(default_factory=dict)   # for the timeline word-count toggle
+    daily_words_them: dict[str, int] = field(default_factory=dict)
+    # Time-stamped samples for the "metrics over time" plots in the
+    # HTML report. Each element is (sample_ts_seconds, value).
+    my_reply_times_ts:    list[tuple[int, int]] = field(default_factory=list)
+    their_reply_times_ts: list[tuple[int, int]] = field(default_factory=list)
+    my_chain_sizes_ts:    list[tuple[int, int]] = field(default_factory=list)
+    their_chain_sizes_ts: list[tuple[int, int]] = field(default_factory=list)
     # chain stats — a "chain" is a run of consecutive messages from the same sender
     my_chain_lengths:    list[int] = field(default_factory=list)
     their_chain_lengths: list[int] = field(default_factory=list)
@@ -134,16 +142,21 @@ def compute(messages: list[Message], contact: ContactRecord, my_label: str = "Me
     current_chain_side: str | None = None
     current_chain_len: int = 0
     current_chain_words: int = 0
+    current_chain_start_ts: int | None = None  # ts of the first message in the active chain
 
-    def _close_chain(side, length, words):
+    def _close_chain(side, length, words, start_ts):
         if length <= 0:
             return
         if side == "me":
             c.my_chain_lengths.append(length)
             c.my_chain_words.append(words)
+            if start_ts is not None:
+                c.my_chain_sizes_ts.append((start_ts, length))
         elif side == "them":
             c.their_chain_lengths.append(length)
             c.their_chain_words.append(words)
+            if start_ts is not None:
+                c.their_chain_sizes_ts.append((start_ts, length))
 
     for m in messages:
         c.total += 1
@@ -180,8 +193,10 @@ def compute(messages: list[Message], contact: ContactRecord, my_label: str = "Me
             msg_words = len(_WORD_RE.findall(text))
         if side == "me":
             c.my_total_words += msg_words
+            c.daily_words_me[date_str] = c.daily_words_me.get(date_str, 0) + msg_words
         elif side == "them":
             c.their_total_words += msg_words
+            c.daily_words_them[date_str] = c.daily_words_them.get(date_str, 0) + msg_words
 
         # chain bookkeeping (msg + word count)
         if side is not None:
@@ -189,10 +204,12 @@ def compute(messages: list[Message], contact: ContactRecord, my_label: str = "Me
                 current_chain_len += 1
                 current_chain_words += msg_words
             else:
-                _close_chain(current_chain_side, current_chain_len, current_chain_words)
+                _close_chain(current_chain_side, current_chain_len,
+                             current_chain_words, current_chain_start_ts)
                 current_chain_side = side
                 current_chain_len = 1
                 current_chain_words = msg_words
+                current_chain_start_ts = m.create_time
                 if side == "me":
                     c.chain_starts_me += 1
                 else:
@@ -209,14 +226,18 @@ def compute(messages: list[Message], contact: ContactRecord, my_label: str = "Me
                 )
             if m.is_me:
                 if pending_other_ts is not None:
-                    c.response_time_seconds.append(m.create_time - pending_other_ts)
+                    latency = m.create_time - pending_other_ts
+                    c.response_time_seconds.append(latency)
+                    c.my_reply_times_ts.append((m.create_time, latency))
                     pending_other_ts = None
                 # remember when *I* started waiting for their reply
                 if pending_me_ts is None:
                     pending_me_ts = m.create_time
             elif m.sender_username == contact.username:
                 if pending_me_ts is not None:
-                    c.their_response_time_seconds.append(m.create_time - pending_me_ts)
+                    latency = m.create_time - pending_me_ts
+                    c.their_response_time_seconds.append(latency)
+                    c.their_reply_times_ts.append((m.create_time, latency))
                     pending_me_ts = None
                 if pending_other_ts is None:
                     pending_other_ts = m.create_time
@@ -241,7 +262,8 @@ def compute(messages: list[Message], contact: ContactRecord, my_label: str = "Me
                     sender_words[sender].append(w)
 
     # close the final open chain
-    _close_chain(current_chain_side, current_chain_len, current_chain_words)
+    _close_chain(current_chain_side, current_chain_len,
+                 current_chain_words, current_chain_start_ts)
 
     c.top_emojis = emoji_counter.most_common(top_n)
     c.top_words = word_counter.most_common(top_n)

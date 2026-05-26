@@ -1512,19 +1512,27 @@ def _cmd_stats(args, workspace: Path, log) -> int:
         return (r, c)
 
     final_pairs: list[tuple] = []
+    overview_pairs: list[tuple] = []
     for grp in merged_groups:
-        for p in grp:
+        # grp is [combined_pair, wa_pair, we_pair] — only the combined
+        # entry contributes to the overview to avoid double-counting.
+        for i, p in enumerate(grp):
             cp = _to_counts(p)
-            if cp[1].total > 0:
-                final_pairs.append(cp)
+            if cp[1].total == 0:
+                continue
+            final_pairs.append(cp)
+            if i == 0:   # combined
+                overview_pairs.append(cp)
     for p in unmerged_wa:
         cp = _to_counts(p)
         if cp[1].total > 0:
             final_pairs.append(cp)
+            overview_pairs.append(cp)
     for p in unmerged_we:
         cp = _to_counts(p)
         if cp[1].total > 0:
             final_pairs.append(cp)
+            overview_pairs.append(cp)
 
     if not final_pairs:
         print("[!] no data to render — check --alias / --whatsapp-json / --min-messages.")
@@ -1532,7 +1540,8 @@ def _cmd_stats(args, workspace: Path, log) -> int:
 
     n = _report.render_report(final_pairs,
                               my_label=args.my_label,
-                              out_path=out)
+                              out_path=out,
+                              overview_data=overview_pairs)
     print(f"[+] wrote HTML report for {n} contact section(s) → {out}")
     if args.open:
         _open_in_browser(out)
