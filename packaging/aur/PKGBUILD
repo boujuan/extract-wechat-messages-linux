@@ -1,0 +1,42 @@
+# Maintainer: Juan Boullosa <jmboullosa@zentus.io>
+pkgname=wxextract
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Extract WeChat 4.x conversations on Linux into compact LLM-ready text"
+arch=('any')
+url="https://github.com/boujuan/extract-wechat-messages-linux"
+license=('MIT')
+depends=(
+    'python>=3.12'
+    'python-pycryptodome'
+    'python-zstandard'
+    'python-tiktoken'
+    'python-rich'
+    'python-rich-argparse'
+    'python-lxml'
+    'sqlcipher'           # optional but strongly recommended; falls back to pure-Python without it
+    'wechat-bin'          # the AUR build of WeChat 4.x this tool targets
+)
+optdepends=(
+    'rsync: faster snapshot copy (always installed by default; listed for clarity)'
+)
+makedepends=(
+    'python-build'
+    'python-installer'
+    'python-hatchling'
+)
+source=("$pkgname-$pkgver.tar.gz::https://github.com/boujuan/extract-wechat-messages-linux/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')  # update after first release: makepkg -g >> PKGBUILD
+
+build() {
+    cd "extract-wechat-messages-linux-$pkgver"
+    python -m build --wheel --no-isolation
+}
+
+package() {
+    cd "extract-wechat-messages-linux-$pkgver"
+    python -m installer --destdir="$pkgdir" dist/*.whl
+    install -Dm644 README.md      "$pkgdir/usr/share/doc/$pkgname/README.md"
+    install -Dm644 CHANGELOG.md   "$pkgdir/usr/share/doc/$pkgname/CHANGELOG.md"
+    install -Dm644 NOTICE.md      "$pkgdir/usr/share/doc/$pkgname/NOTICE.md"
+}
