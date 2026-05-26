@@ -67,6 +67,12 @@ class Counts:
     daily_counts: dict[str, int] = field(default_factory=dict)       # "2026-04-09" → total
     daily_me:     dict[str, int] = field(default_factory=dict)
     daily_them:   dict[str, int] = field(default_factory=dict)
+    # chain stats — a "chain" is a run of consecutive messages from the same sender
+    my_chain_lengths:    list[int] = field(default_factory=list)
+    their_chain_lengths: list[int] = field(default_factory=list)
+    # who initiates a chain: at every switch, +1 to the side that just started talking
+    chain_starts_me:    int = 0
+    chain_starts_them:  int = 0
 
 
 _TYPE_LABEL = {
@@ -108,6 +114,15 @@ def compute(messages: list[Message], contact: ContactRecord, my_label: str = "Me
     # bidirectional response-time tracking: two pending "first-after-flip" timestamps
     pending_other_ts: int | None = None     # them speaking, waiting for my reply
     pending_me_ts: int | None = None        # me speaking, waiting for their reply
+    # chain tracking
+    current_chain_side: str | None = None   # 'me' | 'them' | None
+    current_chain_len: int = 0
+
+    def _close_chain(side, length):
+        if side == "me" and length > 0:
+            c.my_chain_lengths.append(length)
+        elif side == "them" and length > 0:
+            c.their_chain_lengths.append(length)
 
     for m in messages:
         c.total += 1
@@ -121,10 +136,25 @@ def compute(messages: list[Message], contact: ContactRecord, my_label: str = "Me
         c.by_hour[dt.hour] += 1
         days.add(date_str)
         daily[date_str] += 1
+        side: str | None = None
         if m.is_me:
             daily_me[date_str] += 1
+            side = "me"
         elif m.sender_username == contact.username:
             daily_them[date_str] += 1
+            side = "them"
+        # chain bookkeeping
+        if side is not None:
+            if current_chain_side == side:
+                current_chain_len += 1
+            else:
+                _close_chain(current_chain_side, current_chain_len)
+                current_chain_side = side
+                current_chain_len = 1
+                if side == "me":
+                    c.chain_starts_me += 1
+                else:
+                    c.chain_starts_them += 1
 
         # silence + bidirectional response time
         if prev_ts is not None:
@@ -168,6 +198,9 @@ def compute(messages: list[Message], contact: ContactRecord, my_label: str = "Me
                 if sender in sender_words:
                     sender_words[sender].append(w)
 
+    # close the final open chain
+    _close_chain(current_chain_side, current_chain_len)
+
     c.top_emojis = emoji_counter.most_common(top_n)
     c.top_words = word_counter.most_common(top_n)
     c.active_days = len(days)
@@ -207,11 +240,12 @@ def _percentile(seq: list[int], p: float) -> int:
     return s[k]
 
 
-def _response_table(title: str, rt: list[int]):
+def _response_table(title: str, rt: list[int], subtitle: str | None = None):
     from rich.box import ROUNDED
     from rich.table import Table
     t = Table(box=ROUNDED, show_header=True, header_style="bold cyan",
-              title=f"Response time: {title}", title_style="bold")
+              title=title, title_style="bold",
+              caption=subtitle, caption_style="dim italic")
     t.add_column("Stat")
     t.add_column("Value", justify="right", style="bright_white")
     if rt:
@@ -413,10 +447,44 @@ def render(c: Counts, contact: ContactRecord, my_label: str, console) -> None:
     for w, n in c.top_words:
         t_words.add_row(w, f"{n:,}")
 
-    # ── bidirectional response time ──────────────────────────────────────────
+    # ── chain dynamics ────────────────────────────────────────────────────
     other_name = contact.display_name
-    t_resp_mine = _response_table(f"{my_label} → {other_name}", c.response_time_seconds)
-    t_resp_their = _response_table(f"{other_name} → {my_label}", c.their_response_time_seconds)
+    t_chain = Table(box=ROUNDED, show_header=True, header_style="bold cyan",
+                    title="Chain dynamics",
+                    caption="a 'chain' = consecutive messages from the same sender (sent without the other speaking)",
+                    caption_style="dim italic", title_style="bold")
+    t_chain.add_column("Stat")
+    t_chain.add_column(my_label, justify="right", style="bright_white")
+    t_chain.add_column(other_name, justify="right", style="bright_white")
+    my_n = len(c.my_chain_lengths) or 1
+    their_n = len(c.their_chain_lengths) or 1
+    t_chain.add_row("Chains started",
+                    f"{c.chain_starts_me:,}",
+                    f"{c.chain_starts_them:,}")
+    t_chain.add_row("Median chain length",
+                    f"{_percentile(c.my_chain_lengths, 0.5)}",
+                    f"{_percentile(c.their_chain_lengths, 0.5)}")
+    t_chain.add_row("Mean chain length",
+                    f"{sum(c.my_chain_lengths) / my_n:.1f}",
+                    f"{sum(c.their_chain_lengths) / their_n:.1f}")
+    t_chain.add_row("Longest chain",
+                    f"{max(c.my_chain_lengths, default=0)}",
+                    f"{max(c.their_chain_lengths, default=0)}")
+    t_chain.add_row("Total msgs",
+                    f"{sum(c.my_chain_lengths):,}",
+                    f"{sum(c.their_chain_lengths):,}")
+
+    # ── bidirectional response time ──────────────────────────────────────────
+    # Convention: "X reply latency" = how long X took to send their first
+    # message after Y ended Y's previous chain. Chain-to-chain (first-to-first).
+    t_resp_mine = _response_table(
+        f"{my_label} replies to {other_name}", c.response_time_seconds,
+        subtitle=f"how long {my_label!r} takes to start replying after {other_name} sends",
+    )
+    t_resp_their = _response_table(
+        f"{other_name} replies to {my_label}", c.their_response_time_seconds,
+        subtitle=f"how long {other_name!r} takes to start replying after {my_label} sends",
+    )
 
     t_silence = Table(box=ROUNDED, show_header=True, header_style="bold cyan",
                       title="Silence", title_style="bold")
@@ -435,6 +503,7 @@ def render(c: Counts, contact: ContactRecord, my_label: str, console) -> None:
                  daily_panel, "",
                  hour_panel, dow_panel, "",
                  t_emoji, t_words, "",
+                 t_chain, "",
                  t_resp_mine, t_resp_their, "",
                  t_silence)
     console.print()
