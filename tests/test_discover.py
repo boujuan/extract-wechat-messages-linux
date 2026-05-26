@@ -5,13 +5,30 @@ import pytest
 from wxextract.discover import discover, find_data_root, list_accounts
 
 
+def _wechat_installed() -> bool:
+    """True iff this machine has a WeChat install discoverable on disk."""
+    try:
+        find_data_root()
+        return True
+    except RuntimeError:
+        return False
+
+
+requires_wechat = pytest.mark.skipif(
+    not _wechat_installed(),
+    reason="no WeChat install detected on this machine (CI / fresh systems)",
+)
+
+
+@requires_wechat
 def test_find_data_root_on_this_system():
-    """Smoke test: this machine has WeChat installed, so find_data_root() must return."""
+    """Smoke test: when WeChat is installed, find_data_root() must return."""
     root = find_data_root()
     assert root.is_dir()
     assert root.name == "xwechat_files"
 
 
+@requires_wechat
 def test_list_accounts():
     root = find_data_root()
     accounts = list_accounts(root)
@@ -19,6 +36,7 @@ def test_list_accounts():
     assert all(a.name.startswith("wxid_") for a in accounts)
 
 
+@requires_wechat
 def test_discover_returns_populated_object():
     d = discover()
     assert d.data_root.is_dir()
