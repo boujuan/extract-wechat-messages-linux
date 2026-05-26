@@ -18,73 +18,182 @@ from wxextract import __version__
 from wxextract.util import default_workspace, human_bytes, setup_logging
 
 
+def _make_formatter():
+    """rich-argparse formatter with a couple of style tweaks.
+
+    `RawDescriptionRichHelpFormatter` keeps newlines in description/epilog
+    (so our examples render line-by-line) while still wrapping arg help text.
+    """
+    from rich_argparse import RawDescriptionRichHelpFormatter as Fmt
+    Fmt.styles["argparse.prog"] = "bold cyan"
+    Fmt.styles["argparse.groups"] = "bold yellow"
+    Fmt.styles["argparse.args"] = "bold cyan"
+    Fmt.styles["argparse.metavar"] = "dim cyan"
+    Fmt.styles["argparse.help"] = "default"
+    Fmt.styles["argparse.text"] = "default"
+    Fmt.styles["argparse.syntax"] = "bold"
+    return Fmt
+
+
+_EPILOG = (
+    "[bold yellow]Examples[/]\n"
+    "  [cyan]wxextract[/]                                              "
+    "[dim]interactive picker, all formats[/]\n"
+    "  [cyan]wxextract --alias rachel_97213[/]                         "
+    "[dim]extract one contact[/]\n"
+    "  [cyan]wxextract --alias X --chunk month --format txt-b[/]       "
+    "[dim]monthly chunks, single format[/]\n"
+    "  [cyan]wxextract --alias X --sticker-emojis --reply-preview short[/]  "
+    "[dim]most compact[/]\n"
+    "  [cyan]wxextract preview --alias X --tail 30[/]                  "
+    "[dim]peek at last 30 msgs[/]\n"
+    "  [cyan]wxextract list[/]                                          "
+    "[dim]contacts table[/]\n"
+    "  [cyan]wxextract status[/]                                        "
+    "[dim]install info + cache state[/]\n"
+    "  [cyan]wxextract resnap --no-relaunch[/]                          "
+    "[dim]refresh data, keep WeChat closed[/]\n\n"
+    "[dim]Docs: https://github.com/boujuan/extract-wechat-messages-linux[/]"
+)
+
+
+def _add_common_render_args(sp, *, include_pipeline: bool = False):
+    """Shared argument groups for the `run` and `render` subcommands."""
+    g_sel = sp.add_argument_group("Conversation selection")
+    g_sel.add_argument("--alias", metavar="WECHAT_ID",
+                       help="WeChat ID of the contact to extract (skips the interactive picker).")
+    g_sel.add_argument("--include-recalls", action="store_true",
+                       help="Keep \"X recalled a message\" notifications (default: filter them out).")
+    sp.set_defaults(skip_recalls=True)
+
+    g_out = sp.add_argument_group("Output format")
+    g_out.add_argument("--format", default="txt-b,jsonl,xml", metavar="LIST",
+                       help="Comma list of formats to emit. Default: %(default)s.")
+    g_out.add_argument("--chunk", default="none", metavar="SPEC",
+                       help="Split output: none | month | week | day | tokens:N. Default: %(default)s.")
+    g_out.add_argument("--out-dir", type=str, default=None, metavar="PATH",
+                       help="Override just the output directory (default: <workspace>/output/).")
+    g_out.add_argument("--my-label", default="Me", metavar="STR",
+                       help="Label for your own messages in renders. Default: %(default)s.")
+
+    g_compact = sp.add_argument_group("Compression / styling (TXT-B)")
+    g_compact.add_argument("--time-precision", choices=("seconds", "minutes"),
+                           default="seconds", metavar="MODE",
+                           help="Timestamp granularity in TXT-B. Default: %(default)s.")
+    g_compact.add_argument("--reply-preview", choices=("full", "short", "none"),
+                           default="full", metavar="MODE",
+                           help="Quoted reply rendering: full=sender+time+content, "
+                                "short=sender+time, none=sender only. Default: %(default)s.")
+    g_compact.add_argument("--gap", type=int, default=7200, metavar="SECONDS",
+                           help="Silence gap that starts a new session header. Default: %(default)s.")
+    g_compact.add_argument("--no-turn-merge", action="store_true",
+                           help="Emit one line per message instead of joining same-sender turns with `;`.")
+    g_compact.add_argument("--sticker-emojis", action="store_true",
+                           help="Replace [Chuckle]/[Facepalm]/etc with Unicode emoji.")
+    g_compact.add_argument("--squash-emoji", action="store_true",
+                           help="Collapse [Tag][Tag][Tag] → [Tag×3] for runs of ≥3.")
+    g_compact.add_argument("--redact", action="store_true",
+                           help="Mask emails / phones / IBANs / long digit runs.")
+
+    if include_pipeline:
+        g_pipe = sp.add_argument_group("Pipeline behavior")
+        g_pipe.add_argument("--force", action="store_true",
+                            help="Bypass all caches: re-extract keys and re-decrypt every DB.")
+        g_pipe.add_argument("--no-relaunch", action="store_true",
+                            help="Don't re-launch WeChat after the snapshot "
+                                 "(avoids the \"Open WeChat\" login-confirm dialog).")
+
+
 def build_parser() -> argparse.ArgumentParser:
+    Formatter = _make_formatter()
     p = argparse.ArgumentParser(
         prog="wxextract",
-        description="Extract WeChat 4.x conversations on Linux into compact LLM-ready text.",
+        description=(
+            "[bold]Extract WeChat 4.x conversations on Linux into compact, LLM-ready text.[/]\n\n"
+            "Discovers the WeChat install, recovers SQLCipher keys from a running "
+            "WeChat process, snapshots and decrypts the chat databases, then renders "
+            "one or more output formats with optional token-aware chunking."
+        ),
+        epilog=_EPILOG,
+        formatter_class=Formatter,
     )
-    p.add_argument("--version", action="version", version=f"wxextract {__version__}")
-    p.add_argument("--workspace", type=str, default=None, metavar="PATH",
-                   help="working directory for snapshot/plain_dbs/output (default: <project>/workspace/)")
-    p.add_argument("--account-dir", type=str, default=None, metavar="PATH",
-                   help="WeChat account folder (xwechat_files/wxid_<id>_<suffix>/). "
-                        "Use when multiple accounts are logged in and auto-pick guesses wrong.")
-    p.add_argument("-v", "--verbose", action="store_true",
-                   help="verbose per-stage logging (disables the live progress UI)")
-    p.add_argument("-q", "--quiet", action="store_true",
-                   help="silence all output except errors and the final summary")
-    p.add_argument("--no-progress", action="store_true",
-                   help="disable the rich live progress UI (plain log output instead)")
-    p.add_argument("--no-summary", action="store_true",
-                   help="skip the final summary panel")
 
-    sub = p.add_subparsers(dest="command", required=False)
-    sub.add_parser("status", help="print discovered WeChat install + workspace state, exit")
-    sub.add_parser("list", help="print contacts table, exit (requires prior snapshot/decrypt)")
-    rs = sub.add_parser("resnap", help="close WeChat, refresh snapshot + decrypt, re-open")
-    rs.add_argument("--force", action="store_true",
-                    help="re-extract keys and re-decrypt even if cached versions look fresh")
-    rs.add_argument("--no-relaunch", action="store_true",
-                    help="don't re-launch WeChat after snapshot (avoids the login-confirm dialog)")
+    # ── top-level: I/O & verbosity ────────────────────────────────────────────
+    g_io = p.add_argument_group("Workspace & I/O")
+    g_io.add_argument("--workspace", type=str, default=None, metavar="PATH",
+                      help="Override the workspace directory "
+                           "(snapshot, plain_dbs, output, all_keys.json). "
+                           "Default: ~/.local/share/wxextract/ when installed, "
+                           "<project>/workspace/ when running from source.")
+    g_io.add_argument("--account-dir", type=str, default=None, metavar="PATH",
+                      help="WeChat account folder (xwechat_files/wxid_<id>_<suffix>/). "
+                           "Use when multiple accounts are logged in and auto-pick guesses wrong.")
+    p.add_argument("--version", action="version", version=f"wxextract {__version__}",
+                   help="Show wxextract version and exit.")
 
-    pv = sub.add_parser("preview", help="peek at the most-recent N messages of a contact, no files written")
-    pv.add_argument("--alias", required=True, help="WeChat ID of the contact")
-    pv.add_argument("--tail", type=int, default=20, help="how many recent messages to show (default: 20)")
-    pv.add_argument("--my-label", default="Me")
+    g_verbosity = p.add_argument_group("Verbosity")
+    me = g_verbosity.add_mutually_exclusive_group()
+    me.add_argument("-v", "--verbose", action="store_true",
+                    help="Verbose per-stage logging. Disables the live progress UI.")
+    me.add_argument("-q", "--quiet", action="store_true",
+                    help="Silence everything except errors and the final summary.")
+    g_verbosity.add_argument("--no-progress", action="store_true",
+                             help="Disable the live progress UI (plain log lines instead).")
+    g_verbosity.add_argument("--no-summary", action="store_true",
+                             help="Skip the final summary panel.")
 
-    for name, help_ in [
-        ("run", "full pipeline (default if no subcommand)"),
-        ("render", "only render an already-decrypted conversation"),
-    ]:
-        sp = sub.add_parser(name, help=help_)
-        sp.add_argument("--alias", help="WeChat ID of the contact to extract (skips picker)")
-        sp.add_argument("--format", default="txt-b,jsonl,xml",
-                        help="comma-list of {txt-b,jsonl,xml} (default: all three)")
-        sp.add_argument("--chunk", default="none",
-                        help="none|month|week|day|tokens:N (default: none)")
-        sp.add_argument("--gap", type=int, default=7200, help="session gap seconds (default: 7200)")
-        sp.add_argument("--no-turn-merge", action="store_true")
-        sp.add_argument("--my-label", default="Me")
-        sp.add_argument("--skip-recalls", action="store_true", default=True)
-        sp.add_argument("--include-recalls", action="store_true",
-                        help="opposite of --skip-recalls")
-        sp.add_argument("--squash-emoji", action="store_true",
-                        help="collapse [Tag][Tag][Tag] → [Tag×3] for runs of ≥3")
-        sp.add_argument("--redact", action="store_true",
-                        help="replace emails / phones / IBANs / long digit runs with placeholders")
-        sp.add_argument("--sticker-emojis", action="store_true",
-                        help="replace [Chuckle]/[Facepalm]/etc with Unicode emoji equivalents")
-        sp.add_argument("--time-precision", choices=("seconds", "minutes"), default="seconds",
-                        help="timestamp precision in compact TXT (default: seconds)")
-        sp.add_argument("--reply-preview", choices=("full", "short", "none"), default="full",
-                        help="quoted-reply rendering: full=sender+time+content, short=sender+time, none=sender only")
-        sp.add_argument("--out-dir", type=str, default=None, metavar="PATH",
-                        help="override the output directory (default: <workspace>/output)")
-        if name == "run":
-            sp.add_argument("--force", action="store_true",
-                            help="re-extract keys and re-decrypt even if cached versions look fresh")
-            sp.add_argument("--no-relaunch", action="store_true",
-                            help="don't re-launch WeChat after snapshot (avoids the login-confirm dialog)")
+    # ── subcommands ───────────────────────────────────────────────────────────
+    sub = p.add_subparsers(
+        dest="command", required=False, metavar="<command>",
+        title="Commands",
+        description="Run with no command for the full interactive pipeline.",
+    )
+
+    sp = sub.add_parser("status", help="Show discovered WeChat install + workspace cache state.",
+                        description="Print what wxextract sees about your install + workspace, then exit.",
+                        formatter_class=Formatter)
+
+    sp = sub.add_parser("list", help="List contacts (requires prior snapshot/decrypt).",
+                        description="Print the contacts table sorted by recency, then exit.",
+                        formatter_class=Formatter)
+
+    sp = sub.add_parser("resnap",
+                        help="Close WeChat → refresh snapshot + decrypt → re-open.",
+                        description="Force a fresh snapshot and decrypt pass; doesn't render any conversation.",
+                        formatter_class=Formatter)
+    g_resnap = sp.add_argument_group("Pipeline behavior")
+    g_resnap.add_argument("--force", action="store_true",
+                          help="Bypass all caches: re-extract keys and re-decrypt every DB.")
+    g_resnap.add_argument("--no-relaunch", action="store_true",
+                          help="Don't re-launch WeChat afterwards (avoids the login-confirm dialog).")
+
+    sp = sub.add_parser("preview",
+                        help="Peek at the most-recent N messages of a contact, no files written.",
+                        description="Print the last N messages of a contact straight to stdout; "
+                                    "useful for sanity-checking after a resnap.",
+                        formatter_class=Formatter)
+    sp.add_argument("--alias", required=True, metavar="WECHAT_ID",
+                    help="WeChat ID of the contact.")
+    sp.add_argument("--tail", type=int, default=20, metavar="N",
+                    help="How many recent messages to show. Default: %(default)s.")
+    sp.add_argument("--my-label", default="Me", metavar="STR",
+                    help="Label for your own messages. Default: %(default)s.")
+
+    sp = sub.add_parser("run",
+                        help="Full pipeline: discover → snapshot → decrypt → render. (default)",
+                        description="The default command. Runs the entire pipeline end-to-end with "
+                                    "all caches active (fast-path skips work when no new messages).",
+                        formatter_class=Formatter, epilog=_EPILOG)
+    _add_common_render_args(sp, include_pipeline=True)
+
+    sp = sub.add_parser("render",
+                        help="Render only — assumes plain_dbs already exists.",
+                        description="Skip the resnap step and render straight from existing plain_dbs. "
+                                    "Fastest mode; use after a recent `wxextract run` to re-render with "
+                                    "different flags.",
+                        formatter_class=Formatter, epilog=_EPILOG)
+    _add_common_render_args(sp, include_pipeline=False)
+
     return p
 
 

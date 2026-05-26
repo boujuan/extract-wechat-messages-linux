@@ -9,6 +9,7 @@ dependencies = [
     "zstandard>=0.22",
     "tiktoken>=0.8",
     "rich>=13.7",
+    "rich-argparse>=1.5",
     "lxml>=5.2",
 ]
 
