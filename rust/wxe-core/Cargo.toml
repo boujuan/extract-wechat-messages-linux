@@ -1,0 +1,25 @@
+[package]
+name = "wxe-core"
+version = "0.1.0"
+edition = "2021"
+description = "Hot-path Rust kernels for wxextract (SQLCipher key validation, AES-CBC decrypt)"
+license = "MIT"
+repository = "https://github.com/boujuan/extract-wechat-messages-linux"
+
+[lib]
+name = "wxe_core"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.22", features = ["extension-module", "abi3-py312"] }
+hmac = "0.12"
+sha2 = "0.10"
+pbkdf2 = { version = "0.12", features = ["simple"] }
+subtle = "2.5"
+aes = "0.8"
+cbc = "0.1"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+opt-level = 3
