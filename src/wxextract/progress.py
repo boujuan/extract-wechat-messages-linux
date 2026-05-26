@@ -202,6 +202,8 @@ def file_stats(path: Path, fmt: str) -> dict:
         days = len({d[:10] for d in re.findall(r'<session start="(\d{4}-\d{2}-\d{2})', text)})
     elif fmt == "jsonl":
         days = len(set(re.findall(r'"dt":\s*"(\d{4}-\d{2}-\d{2})', text)))
+    elif fmt == "md":
+        days = len(set(re.findall(r"^## (\d{4}-\d{2}-\d{2})$", text, re.M)))
     else:
         days = 0
     return {"format": fmt, "path": str(path), "size": sz, "lines": lines,

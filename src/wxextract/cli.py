@@ -72,7 +72,8 @@ def _add_common_render_args(sp, *, include_pipeline: bool = False):
 
     g_out = sp.add_argument_group("Output format")
     g_out.add_argument("--format", default="txt-b,jsonl,xml", metavar="LIST",
-                       help="Comma list of formats to emit. Default: %(default)s.")
+                       help="Comma list of formats: txt-b, jsonl, xml, md. "
+                            "Default: %(default)s.")
     g_out.add_argument("--chunk", default="none", metavar="SPEC",
                        help="Split output: none | month | week | day | tokens:N. Default: %(default)s.")
     g_out.add_argument("--out-dir", type=str, default=None, metavar="PATH",
@@ -861,13 +862,14 @@ def _render_and_chunk(args, msgs, contact, my_wxid: str, out_dir: Path,
                       ui=None, name_suffix: str = "") -> tuple[int, list[tuple[str, Path]]]:
     """Render every requested format (+chunk). Returns (exit_code, [(fmt, path)])."""
     from wxextract.chunker import chunk_by_tokens, chunk_calendar
-    from wxextract.render import compact_txt, jsonl, pseudo_xml
+    from wxextract.render import compact_txt, jsonl, markdown, pseudo_xml
     formats = [f.strip() for f in args.format.split(",") if f.strip()]
     base_name = (contact.alias or contact.username) + name_suffix
     render_map = {
         "txt-b": (compact_txt, "txt"),
         "jsonl": (jsonl, "jsonl"),
         "xml": (pseudo_xml, "xml"),
+        "md": (markdown, "md"),
     }
     chunk_arg = args.chunk
     chunk_kind = "none"
@@ -908,6 +910,8 @@ def _render_and_chunk(args, msgs, contact, my_wxid: str, out_dir: Path,
                 reply_preview=getattr(args, "reply_preview", "full"),
             )
         elif fmt == "xml":
+            render_kwargs = dict(common_kw, gap_seconds=args.gap)
+        elif fmt == "md":
             render_kwargs = dict(common_kw, gap_seconds=args.gap)
         else:                                              # jsonl
             render_kwargs = dict(common_kw)
