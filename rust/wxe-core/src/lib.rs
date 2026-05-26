@@ -37,9 +37,11 @@ type HmacSha512 = Hmac<Sha512>;
 /// 4096 bytes).
 #[pyfunction]
 fn verify_enc_key(py: Python<'_>, enc_key: &Bound<'_, PyBytes>, page1: &Bound<'_, PyBytes>) -> PyResult<bool> {
-    py.allow_threads(|| {
-        let enc_key = enc_key.as_bytes();
-        let page1 = page1.as_bytes();
+    // Copy bytes out of the Python objects while we hold the GIL,
+    // then release the GIL for the (potentially expensive) PBKDF2/HMAC work.
+    let enc_key: Vec<u8> = enc_key.as_bytes().to_vec();
+    let page1: Vec<u8> = page1.as_bytes().to_vec();
+    py.allow_threads(move || {
         if enc_key.len() != KEY_SZ || page1.len() < PAGE_SZ {
             return Ok(false);
         }
@@ -51,7 +53,7 @@ fn verify_enc_key(py: Python<'_>, enc_key: &Bound<'_, PyBytes>, page1: &Bound<'_
         }
         // mac_key = PBKDF2-HMAC-SHA512(enc_key, mac_salt, iter=2, dklen=KEY_SZ)
         let mac_key: [u8; KEY_SZ] =
-            pbkdf2_hmac_array::<Sha512, KEY_SZ>(enc_key, &mac_salt, 2);
+            pbkdf2_hmac_array::<Sha512, KEY_SZ>(&enc_key, &mac_salt, 2);
         // hmac_data = page1[16 .. PAGE_SZ - RESERVE_SZ + 16] (= body + IV)
         let hmac_data = &page1[SALT_SZ..(PAGE_SZ - RESERVE_SZ + 16)];
         let stored = &page1[PAGE_SZ - HMAC_SZ..PAGE_SZ];

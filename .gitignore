@@ -8,3 +8,6 @@ __pycache__/
 dist/
 build/
 *.egg-info/
+
+rust/wxe-core/target/
+rust/wxe-core/Cargo.lock
