@@ -6,6 +6,32 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-05-27
+
+Packaging fixes for AUR submission.
+
+### Added
+
+- **`LICENSE`** file (MIT) at repo root. The project always declared
+  MIT in `pyproject.toml` but the file itself was missing.
+
+### Changed
+
+- **`lxml`** removed from runtime `dependencies` — it's only imported
+  by the XML well-formedness assertions in tests. Now lives in
+  the `dev` dependency group. Shrinks the install footprint for
+  end users.
+- **AUR PKGBUILD overhaul**: pkgver bumped 0.1→0.7.1; real sha256
+  hash (was `SKIP`); `wechat-bin` and `sqlcipher` moved to
+  `optdepends` since the tool can render previously-decrypted data
+  without WeChat installed and has a pure-Python AES fallback;
+  `python-wheel` added to `makedepends` per the Arch Python
+  package guidelines; `LICENSE` installed to
+  `/usr/share/licenses/$pkgname/`.
+
+[Unreleased]: https://github.com/boujuan/extract-wechat-messages-linux/compare/v0.7.1...HEAD
+[0.7.1]: https://github.com/boujuan/extract-wechat-messages-linux/releases/tag/v0.7.1
+
 ## [0.7.0] - 2026-05-26
 
 `wxextract render` now accepts WhatsApp JSON files — TXT-B,
@@ -39,7 +65,6 @@ chunker as the WeChat side.
   WhatsApp pairs come pre-loaded. Path through the renderers +
   summary is otherwise identical.
 
-[Unreleased]: https://github.com/boujuan/extract-wechat-messages-linux/compare/v0.7.0...HEAD
 [0.7.0]: https://github.com/boujuan/extract-wechat-messages-linux/releases/tag/v0.7.0
 
 ## [0.6.0] - 2026-05-26

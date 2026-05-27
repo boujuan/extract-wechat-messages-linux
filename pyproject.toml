@@ -1,6 +1,6 @@
 [project]
 name = "wxextract"
-version = "0.7.0"
+version = "0.7.1"
 description = "Extract WeChat 4.x conversations on Linux into compact LLM-ready text"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -10,7 +10,6 @@ dependencies = [
     "tiktoken>=0.8",
     "rich>=13.7",
     "rich-argparse>=1.5",
-    "lxml>=5.2",
 ]
 
 [project.scripts]
@@ -27,6 +26,7 @@ packages = ["src/wxextract"]
 dev = [
     "pytest>=8.0",
     "pytest-cov>=5.0",
+    "lxml>=5.2",   # tests only — XML well-formedness assertions
 ]
 
 [tool.uv]

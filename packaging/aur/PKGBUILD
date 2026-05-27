@@ -1,8 +1,8 @@
 # Maintainer: Juan Boullosa <jmboullosa@zentus.io>
 pkgname=wxextract
-pkgver=0.1.0
+pkgver=0.7.0
 pkgrel=1
-pkgdesc="Extract WeChat 4.x conversations on Linux into compact LLM-ready text"
+pkgdesc="Extract WeChat 4.x conversations on Linux into compact LLM-ready text + interactive HTML report"
 arch=('any')
 url="https://github.com/boujuan/extract-wechat-messages-linux"
 license=('MIT')
@@ -13,20 +13,20 @@ depends=(
     'python-tiktoken'
     'python-rich'
     'python-rich-argparse'
-    'python-lxml'
-    'sqlcipher'           # optional but strongly recommended; falls back to pure-Python without it
-    'wechat-bin'          # the AUR build of WeChat 4.x this tool targets
 )
 optdepends=(
-    'rsync: faster snapshot copy (always installed by default; listed for clarity)'
+    'sqlcipher: faster + WAL-correct decrypt (falls back to pure-Python AES otherwise)'
+    'wechat-bin: the AUR build of WeChat 4.x this tool targets (only needed to extract live data)'
+    'rsync: faster snapshot copy (usually already installed)'
 )
 makedepends=(
     'python-build'
     'python-installer'
+    'python-wheel'
     'python-hatchling'
 )
 source=("$pkgname-$pkgver.tar.gz::https://github.com/boujuan/extract-wechat-messages-linux/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('SKIP')  # update after first release: makepkg -g >> PKGBUILD
+sha256sums=('671764e3d5ff1de361f3f2f51f901c8bb1463dd019f6cfae5bff0675d01f2550')
 
 build() {
     cd "extract-wechat-messages-linux-$pkgver"
@@ -36,6 +36,7 @@ build() {
 package() {
     cd "extract-wechat-messages-linux-$pkgver"
     python -m installer --destdir="$pkgdir" dist/*.whl
+    install -Dm644 LICENSE        "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
     install -Dm644 README.md      "$pkgdir/usr/share/doc/$pkgname/README.md"
     install -Dm644 CHANGELOG.md   "$pkgdir/usr/share/doc/$pkgname/CHANGELOG.md"
     install -Dm644 NOTICE.md      "$pkgdir/usr/share/doc/$pkgname/NOTICE.md"
