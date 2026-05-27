@@ -84,7 +84,7 @@ def build_combined(
     """Merge two (contact, messages) pairs into a synthetic combined view.
 
     Used when the same real-world person appears across two sources
-    (e.g. WhatsApp Raquel + WeChat 🐑Rachel). Messages are concatenated
+    (e.g. WhatsApp Alice + WeChat Alice). Messages are concatenated
     and re-sorted by create_time; the synthetic contact carries
     `source="combined"`.
     """

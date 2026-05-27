@@ -3,29 +3,29 @@
 Output shape::
 
     ---
-    contact: rachel_97213
-    display_name: "🐑Rachel"
+    contact: alice_wxid
+    display_name: "Alice"
     date_range: 2026-04-09..2026-05-26
     messages: 11903
     recall_count: 45
     glossary:
       U: Me
-      R: "🐑Rachel"
+      A: "Alice"
     legend: "Chronological 1-on-1 chat ..."
     ---
 
-    # Conversation with 🐑Rachel
+    # Conversation with Alice
 
     ## 2026-04-09
 
-    **10:30 U** — Ola Raquelinha 👋
+    **10:30 U** — hi there 👋
 
-    **10:35 R** — Ola Juanlinho😆
+    **10:35 A** — hey, how was your day?
 
     ### 11:27 (+3h)
 
-    **11:27 R** — Got it[Chuckle]
-    > U at 10:30 — Ola Raquelinha 👋
+    **11:27 A** — Got it[Chuckle]
+    > U at 10:30 — hi there 👋
 
 The body keeps each message on its own bolded line so it renders cleanly
 in Obsidian, Logseq, or any standard Markdown viewer. Quoted replies are

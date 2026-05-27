@@ -15,55 +15,55 @@ def _synth_doc():
         "schema": "wxextract-whatsapp/1",
         "source": "whatsapp",
         "contact": {
-            "username": "raquel@whatsapp",
-            "alias": "raquel_whatsapp",
-            "nick_name": "Raquel",
+            "username": "bob@whatsapp",
+            "alias": "bob_whatsapp",
+            "nick_name": "Bob",
             "remark": "",
-            "display_name": "Raquel",
+            "display_name": "Bob",
             "local_type": 1,
             "source": "whatsapp",
             "message_count": 5,
             "first_message_ts": 1_750_000_000,
             "last_message_ts": 1_750_000_400,
         },
-        "my_label": "Juan Bou",
+        "my_label": "Me",
         "messages": [
             {"local_id": 1, "server_id": 0, "create_time": 1_750_000_000,
-             "sender_username": "Juan Bou", "is_me": True,
+             "sender_username": "Me", "is_me": True,
              "type": TYPE_TEXT, "sub_type": 0,
-             "content": "Hola Raquel", "source": "whatsapp",
+             "content": "hi Bob", "source": "whatsapp",
              "raw_local_type": TYPE_TEXT, "status": 3},
             {"local_id": 2, "server_id": 0, "create_time": 1_750_000_100,
-             "sender_username": "Raquel", "is_me": False,
+             "sender_username": "Bob", "is_me": False,
              "type": TYPE_TEXT, "sub_type": 0,
-             "content": "Hola Juan! Cómo estás?", "source": "whatsapp",
+             "content": "hey! how are you?", "source": "whatsapp",
              "raw_local_type": TYPE_TEXT, "status": 3},
             {"local_id": 3, "server_id": 0, "create_time": 1_750_000_200,
-             "sender_username": "Raquel", "is_me": False,
+             "sender_username": "Bob", "is_me": False,
              "type": TYPE_TEXT, "sub_type": 0,
-             "content": "Bien y tu?", "source": "whatsapp",
+             "content": "good, you?", "source": "whatsapp",
              "raw_local_type": TYPE_TEXT, "status": 3},
             {"local_id": 4, "server_id": 0, "create_time": 1_750_000_300,
-             "sender_username": "Juan Bou", "is_me": True,
+             "sender_username": "Me", "is_me": True,
              "type": TYPE_MEDIA_GENERIC, "sub_type": 0,
              "content": "", "source": "whatsapp",
              "raw_local_type": TYPE_MEDIA_GENERIC, "status": 3},
             {"local_id": 5, "server_id": 0, "create_time": 1_750_000_400,
-             "sender_username": "Juan Bou", "is_me": True,
+             "sender_username": "Me", "is_me": True,
              "type": TYPE_TEXT, "sub_type": 0,
-             "content": "Aquí va una foto 📸", "source": "whatsapp",
+             "content": "here's a photo 📸", "source": "whatsapp",
              "raw_local_type": TYPE_TEXT, "status": 3},
         ],
     }
 
 
 def test_load_whatsapp_json(tmp_path):
-    p = tmp_path / "raquel.json"
+    p = tmp_path / "bob.json"
     p.write_text(json.dumps(_synth_doc()), encoding="utf-8")
     contact, msgs, my_label = whatsapp.load_whatsapp_json(p)
-    assert contact.display_name == "Raquel"
+    assert contact.display_name == "Bob"
     assert contact.source == "whatsapp"
-    assert my_label == "Juan Bou"
+    assert my_label == "Me"
     assert len(msgs) == 5
     assert sum(1 for m in msgs if m.is_me) == 3
     assert sum(1 for m in msgs if m.type == TYPE_MEDIA_GENERIC) == 1
@@ -79,7 +79,7 @@ def test_load_rejects_bad_schema(tmp_path):
 
 
 def test_stats_compute_runs_on_whatsapp(tmp_path):
-    p = tmp_path / "raquel.json"
+    p = tmp_path / "bob.json"
     p.write_text(json.dumps(_synth_doc()), encoding="utf-8")
     contact, msgs, _ = whatsapp.load_whatsapp_json(p)
     c = stats.compute(msgs, contact, my_label="Me", top_n=5)
@@ -92,7 +92,7 @@ def test_stats_compute_runs_on_whatsapp(tmp_path):
 
 
 def test_render_report_with_whatsapp_pair(tmp_path):
-    p = tmp_path / "raquel.json"
+    p = tmp_path / "bob.json"
     p.write_text(json.dumps(_synth_doc()), encoding="utf-8")
     contact, msgs, _ = whatsapp.load_whatsapp_json(p)
     c = stats.compute(msgs, contact, my_label="Me", top_n=5)
@@ -100,22 +100,22 @@ def test_render_report_with_whatsapp_pair(tmp_path):
     n = report.render_report([(contact, c)], my_label="Me", out_path=out)
     assert n == 1
     text = out.read_text(encoding="utf-8")
-    assert "Raquel" in text
+    assert "Bob" in text
     assert "WhatsApp" in text
     assert "Plotly.newPlot" in text
     assert text.count('<script type="application/json"') >= 4
 
 
 def test_build_combined_merges_messages(tmp_path):
-    p = tmp_path / "raquel.json"
+    p = tmp_path / "bob.json"
     p.write_text(json.dumps(_synth_doc()), encoding="utf-8")
     contact_wa, msgs_wa, _ = whatsapp.load_whatsapp_json(p)
     # Synthesize a tiny WeChat-side pair so we can call build_combined.
     from wxextract.contacts import ContactRecord
     from wxextract.messages import Message
     contact_we = ContactRecord(
-        username="wxid_test", alias="rachel_97213",
-        nick_name="🐑Rachel", remark="", local_type=1,
+        username="wxid_test", alias="bob_wxid",
+        nick_name="Bob", remark="", local_type=1,
         message_count=2, first_ts=1_770_000_000, last_ts=1_770_000_010,
         source="wechat",
     )
@@ -131,11 +131,11 @@ def test_build_combined_merges_messages(tmp_path):
     ]
     combined_contact, combined_msgs = whatsapp.build_combined(
         (contact_wa, msgs_wa), (contact_we, msgs_we),
-        display_name="Raquel",
-        alias="raquel_combined",
+        display_name="Bob",
+        alias="bob_combined",
     )
     assert combined_contact.source == "combined"
-    assert combined_contact.display_name == "Raquel"
+    assert combined_contact.display_name == "Bob"
     assert len(combined_msgs) == 7
     # Sorted by create_time → WhatsApp range first, then WeChat
     assert combined_msgs[0].create_time == 1_750_000_000

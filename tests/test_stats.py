@@ -40,7 +40,7 @@ def test_empty_messages_returns_zero_counts(contact_record):
 
 # ── synthetic timeline locks down the chain + response-time semantics ─────
 
-def _synth_msg(ts, who, contact_username="rachel_id"):
+def _synth_msg(ts, who, contact_username="alice_id"):
     from types import SimpleNamespace
     return SimpleNamespace(
         local_id=ts, server_id=0, create_time=ts, sender_id=0,
@@ -55,8 +55,8 @@ def test_chain_to_chain_response_time_semantics():
     """Chain switch produces exactly one sample on the responding side.
     Sample count for the two directions differs by at most 1."""
     from wxextract.contacts import ContactRecord
-    rachel = ContactRecord(username="rachel_id", alias="rachel", nick_name="Rachel",
-                           remark="", local_type=1)
+    alice = ContactRecord(username="alice_id", alias="alice", nick_name="Alice",
+                          remark="", local_type=1)
     # Timeline:   R R . M M M . R . M M . R R
     # Chains:     [RR]  [MMM]  [R]  [MM]  [RR]
     # Switches:   R→M       M→R    R→M   M→R
@@ -65,14 +65,14 @@ def test_chain_to_chain_response_time_semantics():
             _synth_msg(120, "R"),
             _synth_msg(180, "M"), _synth_msg(190, "M"),
             _synth_msg(300, "R"), _synth_msg(310, "R")]
-    c = stats.compute(msgs, rachel, my_label="Me")
+    c = stats.compute(msgs, alice, my_label="Me")
 
-    # Me's reply latency (after Rachel ends a chain, time until my first reply):
+    # Me's reply latency (after Alice ends a chain, time until my first reply):
     # 1st chain switch R→M at t=60 after R closed at t=10 → 60-0 = 60s (vs LAST-R t=10 would be 50s; we use FIRST)
     # 2nd chain switch R→M at t=180 after R closed at t=120 → 180-120 = 60s
     assert c.response_time_seconds == [60, 60]
 
-    # Rachel's reply latency (after Me ends a chain, time until her first reply):
+    # Alice's reply latency (after Me ends a chain, time until her first reply):
     # M→R at t=120 after M started at t=60 → 120-60 = 60s
     # M→R at t=300 after M started at t=180 → 300-180 = 120s
     assert c.their_response_time_seconds == [60, 120]
@@ -91,10 +91,10 @@ def test_chain_to_chain_response_time_semantics():
 def test_no_samples_when_one_sided():
     """If only one person talks, neither response-time array has samples."""
     from wxextract.contacts import ContactRecord
-    rachel = ContactRecord(username="rachel_id", alias="rachel", nick_name="Rachel",
-                           remark="", local_type=1)
+    alice = ContactRecord(username="alice_id", alias="alice", nick_name="Alice",
+                          remark="", local_type=1)
     msgs = [_synth_msg(i * 10, "R") for i in range(5)]  # only R speaks
-    c = stats.compute(msgs, rachel, my_label="Me")
+    c = stats.compute(msgs, alice, my_label="Me")
     assert c.response_time_seconds == []
     assert c.their_response_time_seconds == []
     assert c.chain_starts_them == 1   # one big chain

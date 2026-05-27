@@ -106,7 +106,7 @@ in the same interactive HTML report.
 - **`--out PATH` accepts a directory** — if PATH doesn't end with
   `.html`, it's treated as an output directory (created if missing)
   and `report.html` is written inside. Lets the user pass
-  `--out ~/Documents/Raquel/Report/` directly.
+  `--out ~/Documents/chats/Report/` directly.
 - **Source badges** in the report — small coloured tags
   (cyan WeChat / green WhatsApp / gold Combined) appear in each
   contact's section subtitle.
@@ -222,10 +222,10 @@ Stats v3 — deep analytics + comprehensive HTML report.
 ### Fixed
 
 - **Daily timeline labels** — replaced the ambiguous "25/21" format with
-  explicit "Me" and "Rachel" columns plus a header row that maps the
-  bar colors to the participants.
-- **Reply-time direction labels** — "Me → Rachel" was ambiguous (does
-  it mean direction or responder?); now reads "Me replies to Rachel"
+  explicit "Me" and the other party's name columns plus a header row
+  that maps the bar colors to the participants.
+- **Reply-time direction labels** — "Me → Other" was ambiguous (does
+  it mean direction or responder?); now reads "Me replies to <other>"
   with an explicit subtitle.
 
 [0.3.0]: https://github.com/boujuan/extract-wechat-messages-linux/releases/tag/v0.3.0

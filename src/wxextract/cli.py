@@ -39,7 +39,7 @@ _EPILOG = (
     "[bold yellow]Examples[/]\n"
     "  [cyan]wxextract[/]                                              "
     "[dim]interactive picker, all formats[/]\n"
-    "  [cyan]wxextract --alias rachel_97213[/]                         "
+    "  [cyan]wxextract --alias alice_wxid[/]                           "
     "[dim]extract one contact[/]\n"
     "  [cyan]wxextract --alias X --chunk month --format txt-b[/]       "
     "[dim]monthly chunks, single format[/]\n"

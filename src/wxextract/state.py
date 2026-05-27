@@ -6,9 +6,9 @@ runs can emit just the deltas.
 Schema::
 
     {
-      "rachel_97213": {
-        "alias": "rachel_97213",
-        "username": "F100001957286229",
+      "alice_wxid": {
+        "alias": "alice_wxid",
+        "username": "wxid_example_alice",
         "last_local_id": 11923,
         "last_create_time": 1779724567,
         "last_run_at": 1779730000,
