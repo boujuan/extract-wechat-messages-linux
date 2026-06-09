@@ -87,8 +87,7 @@ def _demojibake(s: str) -> str:
 
 
 def _split_folder(folder: str) -> tuple[str, str]:
-    """`rachelpersonalcoachmacau_2023021262428743` →
-    ('rachelpersonalcoachmacau', '2023021262428743'). Falls back to
+    """`alice_1784512330` → ('alice', '1784512330'). Falls back to
     (folder, '') when there is no trailing _<digits>."""
     m = _FOLDER_RE.match(folder)
     if m:
@@ -489,7 +488,7 @@ def _thread_url(thread_id: str) -> str:
 
 def _ig_slug(name: str) -> str:
     """Mimic Instagram's export folder slug: lowercase, alphanumerics only
-    (so the live route's alias matches the export's, e.g. `rachelpersonalcoachmacau`)."""
+    (so the live route's alias matches the export's, e.g. `alicesmith`)."""
     return "".join(c.lower() for c in (name or "") if c.isalnum()) or "instagram"
 
 

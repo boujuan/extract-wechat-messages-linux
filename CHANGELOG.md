@@ -6,6 +6,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-06-09
+
+### Added
+
+- **`wxextract stats --instagram-json PATH`** (+ `--instagram-only`) — the
+  interactive HTML analytics report now includes Instagram conversations
+  alongside WeChat and WhatsApp.
+- **`wxextract instagram fetch --render`** — fetch and render in one step,
+  with `--format` / `--chunk` / `--out-dir` passthrough.
+
+### Changed
+
+- `wxextract --help` now shows an Instagram example, and the README documents
+  the combined WeChat + WhatsApp + Instagram render plus stats coverage.
+- Sanitized example identifiers in docs, code comments, and tests.
+
 ## [0.8.0] - 2026-06-09
 
 Instagram DMs as a first-class source.
@@ -66,7 +82,9 @@ Packaging fixes for AUR submission.
   package guidelines; `LICENSE` installed to
   `/usr/share/licenses/$pkgname/`.
 
-[Unreleased]: https://github.com/boujuan/extract-wechat-messages-linux/compare/v0.7.1...HEAD
+[Unreleased]: https://github.com/boujuan/extract-wechat-messages-linux/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/boujuan/extract-wechat-messages-linux/compare/v0.8.0...v0.8.1
+[0.8.0]: https://github.com/boujuan/extract-wechat-messages-linux/compare/v0.7.1...v0.8.0
 [0.7.1]: https://github.com/boujuan/extract-wechat-messages-linux/releases/tag/v0.7.1
 
 ## [0.7.0] - 2026-05-26

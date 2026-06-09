@@ -195,27 +195,39 @@ wxextract instagram list --export ~/Downloads/instagram-export.zip
 
 # 2. fetch one thread by slug substring → <workspace>/output/<slug>.json
 #    ("me" auto-derives as the participant that isn't the thread title)
-wxextract instagram fetch --export ~/Downloads/instagram-export.zip --thread rachel
+wxextract instagram fetch --export ~/Downloads/instagram-export.zip --thread alice
 
 # 3. render it like any other source
 wxextract render --instagram-only \
-    --instagram-json ~/.local/share/wxextract/output/rachelpersonalcoachmacau.json \
+    --instagram-json ~/.local/share/wxextract/output/alice.json \
     --format txt-b,xml,md,jsonl --chunk month
 ```
 
 Live route (Zen / Firefox / Chrome / Brave / Edge cookie auto-detected). The
 selector is resolved via your inbox, so it can be the id from the
-`instagram.com/direct/t/<id>` URL, a participant name, or the export id:
+`instagram.com/direct/t/<id>` URL, a participant name, or the export id.
+Add `--render` to fetch **and** render in one step:
 
 ```sh
-wxextract instagram fetch --thread 120806779310289 --cookies-from-browser zen
-wxextract instagram fetch --thread rachel          --cookies-from-browser zen
+wxextract instagram fetch --thread alice --cookies-from-browser zen
+wxextract instagram fetch --thread alice --cookies-from-browser zen \
+    --render --format txt-b,md --chunk month --out-dir ~/chats/instagram
 ```
 
 Type mapping: text → text; photos → `[image]`; videos → `[video]`;
 voice notes → `[voice]`; shares/reels/links → `[link: text — url]`;
 calls → `[call]`. **Mojibake** in the official export (double-encoded
 UTF-8) is repaired automatically.
+
+All three sources render in one command (one set of files per contact), and the
+HTML report (`wxextract stats`) accepts `--instagram-json` too:
+
+```sh
+wxextract render --alias alice_wxid \
+    --whatsapp-json alice.wxextract.json \
+    --instagram-json alice_ig.json --chunk month
+wxextract stats --instagram-json alice_ig.json --html   # interactive report
+```
 
 **Limitations** (v1): 1-on-1 only (group DMs skipped), reactions and
 unsent messages dropped, media rendered as placeholders (not downloaded),
