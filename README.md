@@ -2,8 +2,8 @@
 
 **Extract WeChat 4.x conversations on Linux into compact LLM-ready text,
 with an interactive HTML analytics report.** Optional WhatsApp and
-Instagram ingest let you analyse multiple channels side-by-side for the
-same person.
+Instagram ingest let you analyse multiple channels side-by-side — or
+`--merge` them into one chronological timeline — for the same person.
 
 Works with the AUR `wechat-bin` build (`/opt/wechat/wechat`, version 4.1.x).
 Four output formats plus a native interactive HTML report:
