@@ -94,6 +94,12 @@ def _add_common_render_args(sp, *, include_pipeline: bool = False):
                             "files alongside any --alias contacts.")
     g_sel.add_argument("--whatsapp-only", action="store_true",
                        help="Skip WeChat data entirely; only render the --whatsapp-json file(s).")
+    g_sel.add_argument("--instagram-json", action="append", default=[], metavar="PATH",
+                       help="Render an Instagram conversation (JSON produced by "
+                            "`wxextract instagram fetch`). Repeatable. Each one gets its own "
+                            "output files alongside any --alias contacts.")
+    g_sel.add_argument("--instagram-only", action="store_true",
+                       help="Skip WeChat data entirely; only render the --instagram-json file(s).")
     sp.set_defaults(skip_recalls=True)
 
     g_out = sp.add_argument_group("Output format")
@@ -322,6 +328,88 @@ def build_parser() -> argparse.ArgumentParser:
                                     "different flags.",
                         formatter_class=Formatter, epilog=_EPILOG)
     _add_common_render_args(sp, include_pipeline=False)
+    p._wxe_sub = sub          # for subcommand-aware error routing (set below subparsers exist)
+
+    # ── instagram: acquire DMs → wxextract-instagram JSON ─────────────────────
+    sp_ig = sub.add_parser(
+        "instagram",
+        help="Extract Instagram DMs (export / live API / console dump) → JSON for `render`.",
+        description="Acquire an Instagram 1-on-1 conversation and normalize it into a "
+                    "wxextract-instagram JSON document, then render it with "
+                    "`wxextract render --instagram-json <file>` (same formats as WeChat/WhatsApp).",
+        formatter_class=Formatter,
+        epilog=(
+            "[bold yellow]Examples[/]\n"
+            "  [cyan]wxextract instagram list --export dump.zip[/]                 "
+            "[dim]list threads in a Download-Your-Information zip[/]\n"
+            "  [cyan]wxextract instagram fetch --export dump.zip --thread rachel[/]  "
+            "[dim]one thread by slug → output/<slug>.json[/]\n"
+            "  [cyan]wxextract instagram fetch --thread 340282… --cookies-from-browser zen[/]  "
+            "[dim]live (private API)[/]\n"
+            "  [cyan]wxextract instagram snippet > ig_dump.js[/]                   "
+            "[dim]browser console/bookmarklet dumper[/]\n"
+            "  [cyan]wxextract render --instagram-json output/rachel.json --chunk month[/]  "
+            "[dim]render it[/]"
+        ),
+    )
+    ig_sub = sp_ig.add_subparsers(dest="ig_action", required=True, metavar="<action>")
+    sp_ig._wxe_sub = ig_sub   # for subcommand-aware error routing
+
+    ig_fetch = ig_sub.add_parser(
+        "fetch", help="Acquire + normalize one (or --all) conversation(s) into JSON.",
+        description="Pick exactly one source: --export (safe, official zip/folder), "
+                    "--thread (live private API, against Instagram ToS), or --dump "
+                    "(browser console JSON). Writes a wxextract-instagram/1 JSON.",
+        formatter_class=Formatter)
+    g_src = ig_fetch.add_argument_group("Source (choose one)")
+    g_src.add_argument("--export", metavar="PATH",
+                       help="Instagram 'Download Your Information' export: a .zip OR an "
+                            "extracted folder. DMs are found under …/messages/inbox/.")
+    g_src.add_argument("--thread", metavar="SELECTOR",
+                       help="With --export: pick the thread whose folder matches SELECTOR "
+                            "(slug or numeric id substring). Without --export (live API): the "
+                            "thread is resolved via your inbox — SELECTOR can be the id from "
+                            "instagram.com/direct/t/<id>, a participant name/@username, or the "
+                            "export id.")
+    g_src.add_argument("--dump", metavar="PATH",
+                       help="A JSON file saved by the `instagram snippet` console dumper.")
+    g_src.add_argument("--all", action="store_true",
+                       help="With --export: fetch every thread in the inbox (one JSON each "
+                            "into --out as a directory).")
+    g_meta = ig_fetch.add_argument_group("Identity / output")
+    g_meta.add_argument("--me", metavar="NAME",
+                        help="Your display name. Default: auto-derived (the participant "
+                             "that isn't the thread title, for 1-on-1 exports).")
+    g_meta.add_argument("-o", "--out", metavar="PATH",
+                        help="Output JSON path (or directory with --all). "
+                             "Default: <workspace>/output/<slug>.json.")
+    g_cookie = ig_fetch.add_argument_group("Live --thread cookies (browser-flexible)")
+    g_cookie.add_argument("--cookies-from-browser", metavar="NAME",
+                          choices=("zen", "firefox", "chrome", "chromium", "brave", "edge"),
+                          help="Which browser to read the instagram.com session cookie from. "
+                               "Default: auto-try (Zen first, then the rest).")
+    g_cookie.add_argument("--sessionid", metavar="VALUE",
+                          help="Paste the `sessionid` cookie directly (skips browser reading).")
+    g_cookie.add_argument("--cookie-file", metavar="PATH",
+                          help="Path to a Firefox-format cookies.sqlite to read.")
+    g_cookie.add_argument("--limit", type=int, default=40, metavar="N",
+                          help="Per-request page size for API pagination. Default: %(default)s.")
+    g_cookie.add_argument("--max-messages", type=int, default=0, metavar="N",
+                          help="Stop after N messages (0 = whole thread). Default: %(default)s.")
+
+    ig_list = ig_sub.add_parser(
+        "list", help="List the inbox threads in an export (slug, name, message count).",
+        description="Print every conversation found in an Instagram export so you can pick "
+                    "a --thread selector for `fetch`.",
+        formatter_class=Formatter)
+    ig_list.add_argument("--export", required=True, metavar="PATH",
+                         help="Instagram export .zip or extracted folder.")
+
+    ig_sub.add_parser(
+        "snippet", help="Print the browser console/bookmarklet DM dumper to stdout.",
+        description="Emit the browser-agnostic JS that paginates a thread and downloads "
+                    "ig_<id>.json — feed that to `fetch --dump`.",
+        formatter_class=Formatter)
 
     return p
 
@@ -344,7 +432,7 @@ def _inject_default_subcommand(argv: list[str]) -> list[str]:
                  "--no-progress", "--no-summary", "--no-update-check"}
     top_level_takes_arg = {"--workspace", "--account-dir"}
     subs = {"status", "list", "resnap", "run", "render", "preview",
-            "stats", "images", "cleanup"}
+            "stats", "images", "cleanup", "instagram"}
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -369,6 +457,22 @@ def _inject_default_subcommand(argv: list[str]) -> list[str]:
     return argv + ["run"]
 
 
+def _subparser_for(parser, args):
+    """Return the most specific (sub)parser for the parsed command, so error
+    messages show that subcommand's usage (with all its flags) instead of the
+    bare top-level usage. Walks one level of nesting (e.g. `instagram fetch`)."""
+    sub = getattr(parser, "_wxe_sub", None)
+    cmd = getattr(args, "command", None)
+    target = sub.choices.get(cmd) if (sub and cmd) else None
+    if target is None:
+        return parser
+    nested = getattr(target, "_wxe_sub", None)
+    act = getattr(args, "ig_action", None)
+    if nested and act and act in nested.choices:
+        return nested.choices[act]
+    return target
+
+
 def main(argv: list[str] | None = None) -> int:
     try:
         return _main(argv)
@@ -381,7 +485,11 @@ def _main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     raw = sys.argv[1:] if argv is None else list(argv)
     raw = _inject_default_subcommand(raw)
-    args = parser.parse_args(raw)
+    args, extras = parser.parse_known_args(raw)
+    if extras:
+        # Route the error to the relevant subcommand so its usage (with all
+        # flags like --out-dir) is shown, not the bare top-level usage.
+        _subparser_for(parser, args).error("unrecognized arguments: " + " ".join(extras))
     # With the live progress UI active we want logging quiet to avoid interleaving.
     # -v restores verbose INFO output (and turns the live UI off automatically).
     use_progress = not args.verbose and not args.no_progress
@@ -428,6 +536,8 @@ def _main(argv: list[str] | None = None) -> int:
             return _cmd_images(args, workspace, log)
         if cmd == "cleanup":
             return _cmd_cleanup(args, workspace, log)
+        if cmd == "instagram":
+            return _cmd_instagram(args, workspace, log)
         if cmd == "run":
             return _cmd_run(args, workspace, log, ui=ui)
         parser.print_help()
@@ -503,6 +613,82 @@ def _cmd_list(workspace: Path) -> int:
     recs = load_contacts(plain)
     render_table(recs, Console(), limit=None)
     return 0
+
+
+# ---------------------------------------------------------------------------
+# instagram — acquire DMs → wxextract-instagram JSON (then `render --instagram-json`)
+# ---------------------------------------------------------------------------
+
+
+def _cmd_instagram(args, workspace: Path, log) -> int:
+    from wxextract import instagram as ig
+    action = getattr(args, "ig_action", None)
+
+    if action == "snippet":
+        print(ig.console_snippet())
+        return 0
+
+    if action == "list":
+        try:
+            rows = ig.list_threads(args.export)
+        except (ValueError, FileNotFoundError, OSError) as e:
+            print(f"[!] {e}")
+            return 2
+        if not rows:
+            print("[!] no inbox threads found in export.")
+            return 2
+        print(f"{'SLUG':40}  {'MSGS':>7}  DISPLAY NAME")
+        for r in rows:
+            print(f"{r['slug'][:40]:40}  {r['message_count']:>7}  {r['display_name']}")
+        print(f"\n{len(rows)} thread(s). Pick one with: "
+              f"wxextract instagram fetch --export <path> --thread <slug>")
+        return 0
+
+    if action == "fetch":
+        out_dir = workspace / "output"
+        try:
+            if args.export:
+                docs = ig.fetch_from_export(args.export, args.thread,
+                                            me=args.me, all_threads=args.all)
+            elif args.dump:
+                docs = ig.fetch_from_dump(args.dump, me=args.me)
+            elif args.thread:
+                print(f"[+] fetching thread {args.thread} via private API "
+                      f"(cookies: {args.cookies_from_browser or 'auto'}) — this is against "
+                      f"Instagram's ToS; going gently…")
+                docs = ig.fetch_from_api(
+                    args.thread, browser=args.cookies_from_browser,
+                    sessionid=args.sessionid, cookie_file=args.cookie_file,
+                    limit=args.limit, max_messages=args.max_messages, me=args.me)
+            else:
+                print("[!] fetch needs one of: --export, --dump, or --thread")
+                return 2
+        except (ValueError, FileNotFoundError, RuntimeError, OSError) as e:
+            print(f"[!] {e}")
+            return 2
+
+        multi = len(docs) > 1
+        out_arg = Path(args.out).expanduser() if args.out else None
+        written: list = []
+        for doc in docs:
+            slug = doc["contact"]["alias"] or "instagram"
+            if out_arg is None:
+                out_path = out_dir / f"{slug}.json"
+            elif multi or out_arg.is_dir() or out_arg.suffix.lower() != ".json":
+                out_path = out_arg / f"{slug}.json"      # --out treated as a directory
+            else:
+                out_path = out_arg                       # --out is an exact file (single thread)
+            p = ig.write_doc(doc, out_path)
+            written.append((p, doc["contact"]["message_count"], doc["my_label"]))
+        for p, n, my_label in written:
+            print(f"[+] wrote {n:,} messages (me={my_label!r}) → {p}")
+        if written:
+            print("\nRender with: wxextract render --instagram-json "
+                  f"{written[0][0]} --format txt-b,jsonl,xml,md --chunk month")
+        return 0
+
+    print("[!] unknown instagram action")
+    return 2
 
 
 # ---------------------------------------------------------------------------
@@ -841,17 +1027,21 @@ def _cmd_render(args, workspace: Path, log, ui=None) -> int:
     md / jsonl), same chunker. Can be combined with --alias, or used
     alone via --whatsapp-only (skips WeChat entirely).
     """
+    from wxextract import instagram as _ig
     from wxextract import whatsapp as _wa
     from wxextract.contacts import find_by_alias, load_contacts
     from wxextract.picker import pick
     t_start = time.perf_counter()
     whatsapp_paths = list(getattr(args, "whatsapp_json", []) or [])
     whatsapp_only = bool(getattr(args, "whatsapp_only", False))
+    instagram_paths = list(getattr(args, "instagram_json", []) or [])
+    instagram_only = bool(getattr(args, "instagram_only", False))
+    external_only = whatsapp_only or instagram_only
 
     plain = workspace / "plain_dbs"
     recs: list = []
     contacts: list = []
-    if not whatsapp_only:
+    if not external_only:
         if not plain.is_dir():
             print(f"[!] no plain_dbs at {plain}. "
                   f"Run `wxextract run` first, or pass --whatsapp-only.")
@@ -875,10 +1065,24 @@ def _cmd_render(args, workspace: Path, log, ui=None) -> int:
             print(f"[!] failed to load {wp}: {e}")
             return 2
         whatsapp_pairs.append((wa_contact, wa_msgs))
-    if whatsapp_only:
-        # No WeChat selection needed — WhatsApp pairs are already loaded.
+    instagram_pairs: list[tuple] = []
+    for p in instagram_paths:
+        ip = Path(p).expanduser()
+        if not ip.is_file():
+            print(f"[!] Instagram JSON not found: {ip}")
+            return 2
+        try:
+            ig_contact, ig_msgs, _ = _ig.load_instagram_json(ip)
+        except (ValueError, KeyError, json.JSONDecodeError) as e:
+            print(f"[!] failed to load {ip}: {e}")
+            return 2
+        instagram_pairs.append((ig_contact, ig_msgs))
+    external_pairs = whatsapp_pairs + instagram_pairs
+    if external_only:
+        # No WeChat selection needed — external pairs are already loaded.
         if ui:
-            ui.end("Contacts", f"--whatsapp-only: {len(whatsapp_pairs)} JSON file(s)")
+            ui.end("Contacts", f"--{'instagram' if instagram_only else 'whatsapp'}-only: "
+                               f"{len(external_pairs)} JSON file(s)")
     elif getattr(args, "all_contacts", False):
         min_msgs = max(1, getattr(args, "min_messages", 1))
         contacts = [r for r in recs if r.message_count >= min_msgs]
@@ -906,11 +1110,11 @@ def _cmd_render(args, workspace: Path, log, ui=None) -> int:
         if ui:
             summary = ", ".join(f"{c.display_name} ({c.message_count:,})" for c in contacts)
             ui.end("Contacts", summary[:80])
-    elif whatsapp_pairs:
-        # --whatsapp-json was given without --alias — skip the picker
-        # and just render the WhatsApp pairs.
+    elif external_pairs:
+        # --whatsapp-json / --instagram-json given without --alias — skip the
+        # picker and just render the external pairs.
         if ui:
-            ui.end("Contacts", f"{len(whatsapp_pairs)} WhatsApp JSON file(s)")
+            ui.end("Contacts", f"{len(external_pairs)} external JSON file(s)")
     else:
         if ui:
             ui.stop()
@@ -930,10 +1134,11 @@ def _cmd_render(args, workspace: Path, log, ui=None) -> int:
     first_ts = None
     last_ts = 0
     # Build the iteration list: WeChat contacts (msgs=None → extract) then
-    # WhatsApp pairs (msgs pre-loaded → skip extract).
-    work: list[tuple] = [(c, None) for c in contacts] + whatsapp_pairs
+    # external pairs (WhatsApp + Instagram, msgs pre-loaded → skip extract).
+    work: list[tuple] = [(c, None) for c in contacts] + external_pairs
     if not work:
-        print("[!] nothing to render — no WeChat contacts selected and no --whatsapp-json given")
+        print("[!] nothing to render — no WeChat contacts selected and no "
+              "--whatsapp-json / --instagram-json given")
         return 2
     summary_contact = work[0][0] if work else None
     per_contact_msgs: list = []        # [(contact, msgs)] — kept for --stats
@@ -956,7 +1161,7 @@ def _cmd_render(args, workspace: Path, log, ui=None) -> int:
             per_contact_msgs.append((contact, msgs))
 
     if rc_overall == 0 and all_outputs and not getattr(args, "no_summary", False) and summary_contact:
-        if len(contacts) == 1:
+        if len(work) == 1:
             sc = summary_contact
         else:
             sc = _make_aggregate_contact(contacts, len(all_outputs))

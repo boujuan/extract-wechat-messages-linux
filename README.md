@@ -1,8 +1,9 @@
 # wxextract
 
 **Extract WeChat 4.x conversations on Linux into compact LLM-ready text,
-with an interactive HTML analytics report.** Optional WhatsApp ingest
-lets you analyse both channels side-by-side for the same person.
+with an interactive HTML analytics report.** Optional WhatsApp and
+Instagram ingest let you analyse multiple channels side-by-side for the
+same person.
 
 Works with the AUR `wechat-bin` build (`/opt/wechat/wechat`, version 4.1.x).
 Four output formats plus a native interactive HTML report:
@@ -96,6 +97,8 @@ wxextract stats   --alias X                   # per-contact analytics panel (ter
 wxextract stats   --alias X --html            # interactive HTML report for one contact
 wxextract stats                               # HTML report across all contacts (≥200 msgs)
 wxextract images  --alias X                   # decrypt .dat image attachments
+wxextract instagram list --export dump.zip    # list Instagram DM threads in an export
+wxextract instagram fetch --export dump.zip --thread X   # → wxextract-instagram JSON
 wxextract cleanup --all                       # wipe workspace (snapshot/decrypted DBs/output/keys/cache)
 wxextract run                                 # everything end-to-end (default)
 ```
@@ -174,6 +177,52 @@ wxextract stats \
 message IDs, all attachments collapse to one `media` bucket, minute
 precision only, edits/deletes lossy, 1-on-1 only.
 
+## Instagram integration (optional)
+
+`wxextract instagram` acquires an Instagram DM thread and normalizes it
+into a `wxextract-instagram/1` JSON that renders through the same
+TXT-B / XML / MD / JSONL pipeline. Three acquisition routes, auto-detected:
+
+| Route | Flag | Notes |
+|---|---|---|
+| Official export | `--export PATH` | Settings → *Download Your Information* (JSON, Messages). A `.zip` or extracted folder. **Safe / ToS-clean.** |
+| Live private API | `--thread <id>` | Paginates `direct_v2/threads` with your browser session cookie. Fast, but **against Instagram's ToS** — small account-action risk. |
+| Browser console | `--dump PATH` | A JSON saved by `wxextract instagram snippet` (a browser-agnostic console/bookmarklet dumper). |
+
+```sh
+# 1. list the threads in an export (slug · message count · display name)
+wxextract instagram list --export ~/Downloads/instagram-export.zip
+
+# 2. fetch one thread by slug substring → <workspace>/output/<slug>.json
+#    ("me" auto-derives as the participant that isn't the thread title)
+wxextract instagram fetch --export ~/Downloads/instagram-export.zip --thread rachel
+
+# 3. render it like any other source
+wxextract render --instagram-only \
+    --instagram-json ~/.local/share/wxextract/output/rachelpersonalcoachmacau.json \
+    --format txt-b,xml,md,jsonl --chunk month
+```
+
+Live route (Zen / Firefox / Chrome / Brave / Edge cookie auto-detected). The
+selector is resolved via your inbox, so it can be the id from the
+`instagram.com/direct/t/<id>` URL, a participant name, or the export id:
+
+```sh
+wxextract instagram fetch --thread 120806779310289 --cookies-from-browser zen
+wxextract instagram fetch --thread rachel          --cookies-from-browser zen
+```
+
+Type mapping: text → text; photos → `[image]`; videos → `[video]`;
+voice notes → `[voice]`; shares/reels/links → `[link: text — url]`;
+calls → `[call]`. **Mojibake** in the official export (double-encoded
+UTF-8) is repaired automatically.
+
+**Limitations** (v1): 1-on-1 only (group DMs skipped), reactions and
+unsent messages dropped, media rendered as placeholders (not downloaded),
+the official export carries no @handle (the thread-folder slug is used).
+The live/console routes need `requests` + `browser_cookie3` (installed
+with the tool).
+
 ## Caching / incremental behavior
 
 | What | Check | Effect |
@@ -214,6 +263,8 @@ Use `--force` to bypass all caches, or `--no-relaunch` to skip the auto-launch.
 --whatsapp-json PATH             # include a WhatsApp JSON (repeatable)
 --whatsapp-merge NAME=ALIAS      # same-person mapping (repeatable)
 --whatsapp-only                  # skip WeChat data entirely
+--instagram-json PATH            # include an Instagram JSON (repeatable)
+--instagram-only                 # skip WeChat data entirely
 ```
 
 ### Compression dial
@@ -321,7 +372,7 @@ messages ── walk Msg_<md5(username)> table, decompress zstd content
    │       decompose local_type = (subType << 32) | type
    │
 render ──── txt-b / jsonl / xml / md + sessionization + identity normalization
-   │       (same pipeline used for both WeChat and WhatsApp sources)
+   │       (same pipeline for WeChat, WhatsApp, and Instagram sources)
    │
 chunk ──── month / week / day / tokens:N
    │
@@ -343,7 +394,8 @@ WXE_TEST_MY_WXID=<your-own-wxid> \
 Coverage: SQLCipher key derivation, byte-for-byte decrypt against a
 known-good baseline, message-count parity, JSON/XML well-formedness, TXT-B
 compression ratio ≥ 30 %, chunker integrity, emoji-squash and redact regexes,
-WhatsApp JSON loader + combined-contact merge.
+WhatsApp JSON loader + combined-contact merge, Instagram loader + export/API
+normalization (mojibake repair, ms/µs timestamps, type mapping, me-derivation).
 
 ## Output locations
 

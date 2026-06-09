@@ -6,6 +6,43 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-06-09
+
+Instagram DMs as a first-class source.
+
+### Added
+
+- **`wxextract instagram`** subcommand — acquire Instagram DMs and normalize
+  them into a `wxextract-instagram/1` JSON that renders through the same
+  `txt-b` / `jsonl` / `xml` / `md` pipeline (and chunking) as WeChat and
+  WhatsApp. Three auto-detected routes:
+  - `--export` — the official *Download Your Information* export (a `.zip` or
+    extracted folder; DMs live under `…/messages/inbox/`). Safe / ToS-clean.
+  - `--thread` — the live private API. The selector resolves via your inbox, so
+    it can be the id from the `instagram.com/direct/t/<id>` URL, a participant
+    name, or the export id. Reads the browser session cookie (Zen/Firefox/
+    Chrome/Brave/Edge). Against Instagram's ToS — small account-action risk.
+  - `--dump` — a JSON saved by the `wxextract instagram snippet` browser
+    console/bookmarklet dumper.
+  - `wxextract instagram list --export …` enumerates an export's threads.
+- **`wxextract render --instagram-json PATH`** (+ `--instagram-only`), mirroring
+  `--whatsapp-json`.
+- Export mojibake repair (double-encoded UTF-8 → real UTF-8), ms/µs → second
+  timestamp normalization, and Instagram → canonical type mapping
+  (text / image / voice / video / share-as-link / call).
+
+### Changed
+
+- Bad flags on a subcommand now print *that subcommand's* usage (with all its
+  flags, e.g. `--out-dir`) instead of the bare top-level usage.
+- `requests` + `browser-cookie3` added as dependencies (used only by the
+  Instagram live route; the AUR package ships them as `optdepends`).
+
+### Fixed
+
+- Single external-source renders (`--instagram-only` / `--whatsapp-only`) now
+  show the real contact in the summary header instead of "0 contacts".
+
 ## [0.7.1] - 2026-05-27
 
 Packaging fixes for AUR submission.

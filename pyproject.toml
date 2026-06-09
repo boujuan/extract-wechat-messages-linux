@@ -1,6 +1,6 @@
 [project]
 name = "wxextract"
-version = "0.7.1"
+version = "0.8.0"
 description = "Extract WeChat 4.x conversations on Linux into compact LLM-ready text"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -10,6 +10,8 @@ dependencies = [
     "tiktoken>=0.8",
     "rich>=13.7",
     "rich-argparse>=1.5",
+    "requests>=2.31",          # Instagram live-API route
+    "browser-cookie3>=0.19",   # Instagram live-API route (session cookie from any browser)
 ]
 
 [project.scripts]
