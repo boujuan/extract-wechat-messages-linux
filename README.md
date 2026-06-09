@@ -99,6 +99,7 @@ wxextract stats                               # HTML report across all contacts 
 wxextract images  --alias X                   # decrypt .dat image attachments
 wxextract instagram list --export dump.zip    # list Instagram DM threads in an export
 wxextract instagram fetch --export dump.zip --thread X   # → wxextract-instagram JSON
+wxextract combined --alias X --whatsapp-json w.json --instagram-export z.zip --thread X --report r.html  # all-in-one merged report
 wxextract cleanup --all                       # wipe workspace (snapshot/decrypted DBs/output/keys/cache)
 wxextract run                                 # everything end-to-end (default)
 ```
@@ -161,15 +162,15 @@ wxextract render --whatsapp-only \
     --out-dir ~/Documents/chats/whatsapp/
 ```
 
-…or include it in the HTML report (with `--whatsapp-merge` to declare
-"this WhatsApp contact and this WeChat alias are the same person" —
-produces three sections: a combined view, then each source on its own):
+…or include it in the HTML report. Add `--merge` to fuse it with the WeChat
+(and Instagram) conversations of the same person — the report then gets a
+**combined** section (one interleaved timeline) on top of the per-source ones:
 
 ```sh
 wxextract stats \
     --alias alice_wxid \
     --whatsapp-json ~/Documents/chats/whatsapp/whatsapp_chat_with_alice.wxextract.json \
-    --whatsapp-merge "Alice=alice_wxid" \
+    --merge --merge-as Alice \
     --out ~/Documents/chats/combined/
 ```
 
@@ -229,6 +230,21 @@ wxextract render --alias alice_wxid \
 wxextract stats --instagram-json alice_ig.json --html   # interactive report
 ```
 
+### One person across all sources → `wxextract combined`
+
+Add `--merge` to fuse the same person's WeChat + WhatsApp + Instagram into one
+chronological timeline (a combined output/section **on top of** the per-source
+ones). The `combined` subcommand does fetch (Instagram from a zip) + text
+extraction + the merged HTML report in a single invocation:
+
+```sh
+wxextract combined --alias alice_wxid \
+    --whatsapp-json alice.wxextract.json \
+    --instagram-export ~/Downloads/instagram-export.zip --thread alice \
+    --merge-as Alice --chunk month \
+    --out-dir ~/chats/alice --report ~/chats/alice/report.html --open
+```
+
 **Limitations** (v1): 1-on-1 only (group DMs skipped), reactions and
 unsent messages dropped, media rendered as placeholders (not downloaded),
 the official export carries no @handle (the thread-folder slug is used).
@@ -273,10 +289,11 @@ Use `--force` to bypass all caches, or `--no-relaunch` to skip the auto-launch.
 --stats                          # also print analytics panel after the summary
 --no-update-check                # skip the once-per-day GitHub releases check
 --whatsapp-json PATH             # include a WhatsApp JSON (repeatable)
---whatsapp-merge NAME=ALIAS      # same-person mapping (repeatable)
 --whatsapp-only                  # skip WeChat data entirely
 --instagram-json PATH            # include an Instagram JSON (repeatable)
 --instagram-only                 # skip WeChat data entirely
+--merge                          # fuse all sources into one combined timeline
+--merge-as NAME                  # display name for the combined view
 ```
 
 ### Compression dial

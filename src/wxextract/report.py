@@ -683,7 +683,7 @@ def _render_contact(r: ContactRecord, c: Counts, my_label: str) -> str:
     ])
 
     source_label = {"wechat": "WeChat", "whatsapp": "WhatsApp",
-                    "combined": "Combined"}.get(r.source, r.source or "")
+                    "instagram": "Instagram", "combined": "Combined"}.get(r.source, r.source or "")
     source_class = "src-" + (r.source or "wechat")
     badge = (f'<span class="tag {source_class}">{html.escape(source_label)}</span> '
              if source_label else '')
@@ -989,9 +989,10 @@ table.data td.num, table.data th.num {
   font-variant-numeric: tabular-nums;
   margin-right: 6px;
 }
-.tag.src-wechat   { background: rgba(34,211,238,0.15);  color: #22d3ee; }
-.tag.src-whatsapp { background: rgba(63,185,80,0.15);   color: #3fb950; }
-.tag.src-combined { background: rgba(210,153,34,0.15);  color: #d29922; }
+.tag.src-wechat    { background: rgba(34,211,238,0.15);  color: #22d3ee; }
+.tag.src-whatsapp  { background: rgba(63,185,80,0.15);   color: #3fb950; }
+.tag.src-instagram { background: rgba(225,48,108,0.15);  color: #e1306c; }
+.tag.src-combined  { background: rgba(210,153,34,0.15);  color: #d29922; }
 .callout {
   background: rgba(210,153,34,0.08);
   border: 1px solid rgba(210,153,34,0.4);

@@ -6,6 +6,29 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-06-09
+
+Cross-source merging into one timeline.
+
+### Added
+
+- **`--merge`** (on `render`, `run`, `stats`) — treat every provided source
+  (each `--alias` contact + every `--whatsapp-json` + every `--instagram-json`)
+  as the **same person** and additionally emit one combined, chronologically
+  interleaved view. `--merge-as NAME` sets the combined display name.
+  - `render --merge` writes a combined output set alongside the per-source ones.
+  - `stats --merge` adds a combined report section on top of the per-source sections.
+- **`wxextract combined`** — one-shot orchestrator: fetch Instagram from a
+  Download-Your-Information zip (`--instagram-export ZIP --thread SEL`), render
+  all sources to text, and write the merged HTML report (combined + per-source),
+  in a single invocation.
+- Instagram now has a proper source badge (label + colour) in the HTML report.
+
+### Removed
+
+- **`--whatsapp-merge NAME=ALIAS`** (breaking) — superseded by the simpler,
+  source-agnostic `--merge`.
+
 ## [0.8.1] - 2026-06-09
 
 ### Added
@@ -82,7 +105,8 @@ Packaging fixes for AUR submission.
   package guidelines; `LICENSE` installed to
   `/usr/share/licenses/$pkgname/`.
 
-[Unreleased]: https://github.com/boujuan/extract-wechat-messages-linux/compare/v0.8.1...HEAD
+[Unreleased]: https://github.com/boujuan/extract-wechat-messages-linux/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/boujuan/extract-wechat-messages-linux/compare/v0.8.1...v0.9.0
 [0.8.1]: https://github.com/boujuan/extract-wechat-messages-linux/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/boujuan/extract-wechat-messages-linux/compare/v0.7.1...v0.8.0
 [0.7.1]: https://github.com/boujuan/extract-wechat-messages-linux/releases/tag/v0.7.1

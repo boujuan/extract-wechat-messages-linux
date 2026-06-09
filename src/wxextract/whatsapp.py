@@ -73,42 +73,35 @@ def load_whatsapp_json(path: Path) -> tuple[ContactRecord, list[Message], str]:
     return contact, messages, my_label
 
 
-def build_combined(
-    a: tuple[ContactRecord, list[Message]],
-    b: tuple[ContactRecord, list[Message]],
+def build_combined_many(
+    pairs: list[tuple[ContactRecord, list[Message]]],
     *,
     display_name: str,
     username: str | None = None,
     alias: str | None = None,
 ) -> tuple[ContactRecord, list[Message]]:
-    """Merge two (contact, messages) pairs into a synthetic combined view.
+    """Merge N (contact, messages) pairs into one synthetic combined view.
 
-    Used when the same real-world person appears across two sources
-    (e.g. WhatsApp Alice + WeChat Alice). Messages are concatenated
-    and re-sorted by create_time; the synthetic contact carries
-    `source="combined"`.
+    Used when the same real-world person appears across several sources
+    (e.g. WhatsApp + WeChat + Instagram). All non-me messages get a single
+    unified `sender_username` — otherwise stats.compute would miss "them"
+    classifications when each source uses its own username scheme. Messages
+    are concatenated, re-sorted by `create_time`, and `local_id`-renumbered;
+    the synthetic contact carries `source="combined"`.
     """
     from dataclasses import replace
-    (ca, ma) = a
-    (cb, mb) = b
-    # The synthetic contact's username unifies sender_username for
-    # non-me messages from both sources — otherwise stats.compute would
-    # miss "them" classifications when each source uses its own
-    # username scheme.
-    new_username = username or f"combined:{ca.username}+{cb.username}"
+    pairs = [p for p in pairs if p is not None]
+    new_username = username or ("combined:" + "+".join(c.username for c, _ in pairs))
+
     def _rewrite(m):
-        if m.is_me:
-            return m
-        return replace(m, sender_username=new_username)
+        # Keep per-message is_me; only unify the "them" identity.
+        return m if m.is_me else replace(m, sender_username=new_username)
+
     merged_msgs = sorted(
-        [_rewrite(m) for m in (ma + mb)],
+        (_rewrite(m) for _c, msgs in pairs for m in msgs),
         key=lambda m: m.create_time,
     )
-    # Re-number local_id so the merged stream has a consistent ordering.
     merged_msgs = [replace(m, local_id=i) for i, m in enumerate(merged_msgs, start=1)]
-    # Both contacts contribute to the synthetic contact's username
-    # so any downstream code that keys off contact.username doesn't
-    # collide with either source.
     contact = ContactRecord(
         username=new_username,
         alias=alias or "combined",
@@ -120,7 +113,17 @@ def build_combined(
         last_ts=merged_msgs[-1].create_time if merged_msgs else 0,
         source="combined",
     )
-    # The merged messages keep their per-message `is_me` flag because
-    # that's already set correctly from each source. The combined
-    # contact's display name overrides the per-message rendering.
     return contact, merged_msgs
+
+
+def build_combined(
+    a: tuple[ContactRecord, list[Message]],
+    b: tuple[ContactRecord, list[Message]],
+    *,
+    display_name: str,
+    username: str | None = None,
+    alias: str | None = None,
+) -> tuple[ContactRecord, list[Message]]:
+    """Two-pair convenience wrapper around build_combined_many."""
+    return build_combined_many([a, b], display_name=display_name,
+                               username=username, alias=alias)

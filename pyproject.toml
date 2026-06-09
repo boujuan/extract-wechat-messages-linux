@@ -1,6 +1,6 @@
 [project]
 name = "wxextract"
-version = "0.8.1"
+version = "0.9.0"
 description = "Extract WeChat 4.x conversations on Linux into compact LLM-ready text"
 readme = "README.md"
 requires-python = ">=3.12"

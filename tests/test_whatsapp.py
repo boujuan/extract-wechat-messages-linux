@@ -142,3 +142,34 @@ def test_build_combined_merges_messages(tmp_path):
     assert combined_msgs[-1].create_time == 1_770_000_010
     # local_ids re-numbered
     assert [m.local_id for m in combined_msgs] == list(range(1, 8))
+
+
+def test_build_combined_many_three_sources():
+    """N-way merge: 3 sources interleave into one sorted, renumbered timeline."""
+    from wxextract.contacts import ContactRecord
+    from wxextract.messages import Message
+
+    def _pair(uname, source, ts_list):
+        c = ContactRecord(username=uname, alias=uname, nick_name=uname.title(),
+                          remark="", local_type=1, source=source)
+        msgs = [Message(local_id=i, server_id=0, create_time=ts, sender_id=0,
+                        sender_username=uname, is_me=(i % 2 == 0),
+                        type=TYPE_TEXT, sub_type=0, raw_local_type=TYPE_TEXT,
+                        content=f"{source}-{ts}", source="", status=3)
+                for i, ts in enumerate(ts_list, start=1)]
+        return c, msgs
+
+    we = _pair("wxid_a", "wechat", [300, 100])
+    wa = _pair("a@whatsapp", "whatsapp", [200, 400])
+    ig = _pair("a@instagram", "instagram", [150, 500])
+    contact, msgs = whatsapp.build_combined_many(
+        [we, wa, ig], display_name="Alice", alias="alice")
+    assert contact.source == "combined"
+    assert contact.display_name == "Alice" and contact.alias == "alice"
+    assert len(msgs) == 6
+    # fully interleaved by create_time across all three sources
+    assert [m.create_time for m in msgs] == [100, 150, 200, 300, 400, 500]
+    assert [m.local_id for m in msgs] == [1, 2, 3, 4, 5, 6]
+    # non-me senders unified to one username; is_me preserved
+    them = {m.sender_username for m in msgs if not m.is_me}
+    assert them == {contact.username}

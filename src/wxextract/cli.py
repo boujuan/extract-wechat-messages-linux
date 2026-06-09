@@ -102,6 +102,14 @@ def _add_common_render_args(sp, *, include_pipeline: bool = False):
                             "output files alongside any --alias contacts.")
     g_sel.add_argument("--instagram-only", action="store_true",
                        help="Skip WeChat data entirely; only render the --instagram-json file(s).")
+    g_sel.add_argument("--merge", action="store_true",
+                       help="Treat ALL provided sources (every --alias contact + every "
+                            "--whatsapp-json + every --instagram-json) as the SAME person and "
+                            "additionally emit one combined, chronologically-interleaved view "
+                            "alongside the per-source outputs.")
+    g_sel.add_argument("--merge-as", metavar="NAME", default=None,
+                       help="Display name for the --merge combined view "
+                            "(default: the first source's display name).")
     sp.set_defaults(skip_recalls=True)
 
     g_out = sp.add_argument_group("Output format")
@@ -294,11 +302,6 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Include a WhatsApp conversation alongside the WeChat data. PATH is "
                          "a JSON file produced by Parse_Whatsapp_LLM with --format wxextract. "
                          "Repeatable to include multiple WhatsApp contacts.")
-    sp.add_argument("--whatsapp-merge", action="append", default=[], metavar="NAME=ALIAS",
-                    help="Declare that the WhatsApp contact NAME and the WeChat ALIAS are the "
-                         "same person. The report then emits three sections per merge: a "
-                         "combined view, then the WhatsApp-only and WeChat-only views. "
-                         "Repeatable.")
     sp.add_argument("--whatsapp-only", action="store_true",
                     help="Skip WeChat data and render a report containing only the "
                          "--whatsapp-json contacts. Useful for testing without a "
@@ -310,6 +313,13 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--instagram-only", action="store_true",
                     help="Skip WeChat data and render a report containing only the "
                          "--instagram-json (and any --whatsapp-json) contacts.")
+    sp.add_argument("--merge", action="store_true",
+                    help="Treat ALL provided sources (every --alias + every --whatsapp-json + "
+                         "every --instagram-json) as the SAME person: add one combined section "
+                         "(interleaved timeline + analysis) on top of the per-source sections.")
+    sp.add_argument("--merge-as", metavar="NAME", default=None,
+                    help="Display name for the --merge combined section "
+                         "(default: the first source's display name).")
 
     sp = sub.add_parser("preview",
                         help="Peek at the most-recent N messages of a contact, no files written.",
@@ -433,6 +443,56 @@ def build_parser() -> argparse.ArgumentParser:
                     "ig_<id>.json — feed that to `fetch --dump`.",
         formatter_class=Formatter)
 
+    # ── combined: fetch + extract (txt) + merged HTML report, one invocation ──
+    sp_comb = sub.add_parser(
+        "combined",
+        help="One-shot: fetch Instagram (from a zip) + render txt + merged HTML report.",
+        description="Fuse one person's WeChat + WhatsApp + Instagram conversations into a single "
+                    "merged timeline. Fetches the Instagram thread from a Download-Your-Information "
+                    "zip, renders all sources to text (plus one combined view), and writes the "
+                    "interactive HTML report with a combined section + per-source sections.",
+        formatter_class=Formatter,
+        epilog=(
+            "[bold yellow]Example[/]\n"
+            "  [cyan]wxextract combined --alias alice_wxid \\\n"
+            "      --whatsapp-json alice.wxextract.json \\\n"
+            "      --instagram-export export.zip --thread alice \\\n"
+            "      --merge-as Alice --chunk month \\\n"
+            "      --out-dir ~/chats/alice --report ~/chats/alice/report.html --open[/]"
+        ),
+    )
+    g_cs = sp_comb.add_argument_group("Sources (all of the same person)")
+    g_cs.add_argument("--alias", metavar="WECHAT_ID[,...]",
+                      help="WeChat contact(s) for this person (comma-separated).")
+    g_cs.add_argument("--whatsapp-json", action="append", default=[], metavar="PATH",
+                      help="WhatsApp JSON (from Parse_Whatsapp_LLM --format wxextract). Repeatable.")
+    g_cs.add_argument("--instagram-json", action="append", default=[], metavar="PATH",
+                      help="Already-fetched Instagram JSON (from `instagram fetch`). Repeatable.")
+    g_cs.add_argument("--instagram-export", metavar="ZIP",
+                      help="Instagram Download-Your-Information .zip (or extracted folder) to "
+                           "fetch a thread from inline.")
+    g_cs.add_argument("--thread", metavar="SELECTOR",
+                      help="With --instagram-export: which thread (slug/name/id substring). "
+                           "Omit with --instagram-all to take every thread.")
+    g_cs.add_argument("--instagram-all", action="store_true",
+                      help="With --instagram-export: fetch every thread in the inbox.")
+    g_co = sp_comb.add_argument_group("Merge / output")
+    g_co.add_argument("--merge-as", metavar="NAME", default=None,
+                      help="Display name for the combined view "
+                           "(default: the first source's display name).")
+    g_co.add_argument("--format", default="txt-b", metavar="LIST",
+                      help="Render formats: txt-b, jsonl, xml, md. Default: %(default)s.")
+    g_co.add_argument("--chunk", default="none", metavar="SPEC",
+                      help="none | month | week | day | tokens:N. Default: %(default)s.")
+    g_co.add_argument("--out-dir", metavar="PATH",
+                      help="Directory for the rendered text files (default: <workspace>/output/).")
+    g_co.add_argument("--report", metavar="PATH",
+                      help="HTML report path (default: <workspace>/output/combined_report.html).")
+    g_co.add_argument("--open", action="store_true",
+                      help="Open the report in $BROWSER after writing.")
+    g_co.add_argument("--my-label", default="Me", metavar="STR",
+                      help="Label for your own messages. Default: %(default)s.")
+
     return p
 
 
@@ -454,7 +514,7 @@ def _inject_default_subcommand(argv: list[str]) -> list[str]:
                  "--no-progress", "--no-summary", "--no-update-check"}
     top_level_takes_arg = {"--workspace", "--account-dir"}
     subs = {"status", "list", "resnap", "run", "render", "preview",
-            "stats", "images", "cleanup", "instagram"}
+            "stats", "images", "cleanup", "instagram", "combined"}
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -560,6 +620,8 @@ def _main(argv: list[str] | None = None) -> int:
             return _cmd_cleanup(args, workspace, log)
         if cmd == "instagram":
             return _cmd_instagram(args, workspace, log)
+        if cmd == "combined":
+            return _cmd_combined(args, workspace, log)
         if cmd == "run":
             return _cmd_run(args, workspace, log, ui=ui)
         parser.print_help()
@@ -722,6 +784,77 @@ def _cmd_instagram(args, workspace: Path, log) -> int:
 
     print("[!] unknown instagram action")
     return 2
+
+
+# ---------------------------------------------------------------------------
+# combined — fetch + render(txt) + merged HTML report in one invocation
+# ---------------------------------------------------------------------------
+
+
+def _cmd_combined(args, workspace: Path, log) -> int:
+    """Fuse one person's WeChat + WhatsApp + Instagram into a merged timeline.
+
+    Fetches the Instagram thread from a DYI zip (if given), then re-enters the
+    CLI's `render --merge` and `stats --merge` paths so all the existing
+    rendering/report logic is reused unchanged.
+    """
+    from wxextract import instagram as ig
+
+    ig_jsons = [str(Path(p).expanduser()) for p in (args.instagram_json or [])]
+
+    # 1) inline Instagram fetch from the export zip
+    if args.instagram_export:
+        if not args.thread and not args.instagram_all:
+            print("[!] --instagram-export needs --thread <selector> (or --instagram-all)")
+            return 2
+        try:
+            docs = ig.fetch_from_export(args.instagram_export, args.thread,
+                                        all_threads=args.instagram_all)
+        except (ValueError, FileNotFoundError, RuntimeError, OSError) as e:
+            print(f"[!] {e}")
+            return 2
+        out_dir = workspace / "output"
+        for doc in docs:
+            slug = doc["contact"]["alias"] or "instagram"
+            p = ig.write_doc(doc, out_dir / f"{slug}.json")
+            ig_jsons.append(str(p))
+            print(f"[+] instagram: {doc['contact']['message_count']:,} messages → {p}")
+
+    wa_jsons = [str(Path(w).expanduser()) for w in (args.whatsapp_json or [])]
+    if not (args.alias or wa_jsons or ig_jsons):
+        print("[!] nothing to combine — pass --alias / --whatsapp-json / "
+              "--instagram-json / --instagram-export")
+        return 2
+
+    # shared source + merge args for both the render and stats re-entries
+    src: list[str] = []
+    if args.alias:
+        src += ["--alias", args.alias]
+    else:
+        src += ["--instagram-only"]   # no WeChat → skip the plain_dbs requirement
+    for w in wa_jsons:
+        src += ["--whatsapp-json", w]
+    for j in ig_jsons:
+        src += ["--instagram-json", j]
+    merge = ["--merge"] + (["--merge-as", args.merge_as] if args.merge_as else [])
+    mylabel = ["--my-label", args.my_label]
+
+    # 2) render text (per-source + one combined view)
+    print("\n=== render (text) ===")
+    rargv = ["render", *merge, *mylabel, "--format", args.format, "--chunk", args.chunk, *src]
+    if args.out_dir:
+        rargv += ["--out-dir", args.out_dir]
+    rc = main(rargv)
+    if rc != 0:
+        return rc
+
+    # 3) merged HTML report (combined + per-source sections)
+    print("\n=== report (HTML) ===")
+    report = args.report or str(workspace / "output" / "combined_report.html")
+    sargv = ["stats", *merge, *mylabel, "--html", "--out", report, *src]
+    if args.open:
+        sargv.append("--open")
+    return main(sargv)
 
 
 # ---------------------------------------------------------------------------
@@ -1173,6 +1306,25 @@ def _cmd_render(args, workspace: Path, log, ui=None) -> int:
         print("[!] nothing to render — no WeChat contacts selected and no "
               "--whatsapp-json / --instagram-json given")
         return 2
+
+    # --merge: prepend one combined, chronologically-interleaved view (the
+    # per-source outputs are kept too). Needs eager extraction so WeChat
+    # messages can be interleaved with the pre-loaded external ones.
+    if getattr(args, "merge", False):
+        from wxextract.messages import extract as _extract
+        merge_wxid = _detect_my_wxid(workspace) or "wxid_unknown"
+        skip = args.skip_recalls and not getattr(args, "include_recalls", False)
+        all_pairs = [
+            (c, list(pre) if pre is not None
+                else list(_extract(c, my_wxid=merge_wxid, skip_recalls=skip)))
+            for c, pre in work
+        ]
+        merge_name = getattr(args, "merge_as", None) or all_pairs[0][0].display_name
+        merge_alias = "".join(ch.lower() if ch.isalnum() else "_"
+                              for ch in merge_name).strip("_") or "combined"
+        work = [_wa.build_combined_many(all_pairs, display_name=merge_name,
+                                        alias=merge_alias)] + all_pairs
+
     summary_contact = work[0][0] if work else None
     per_contact_msgs: list = []        # [(contact, msgs)] — kept for --stats
     for i, (contact, preloaded) in enumerate(work):
@@ -1658,8 +1810,8 @@ def _cmd_stats(args, workspace: Path, log) -> int:
     """Print conversation analytics for one contact (terminal), or render an HTML report.
 
     Supports WeChat contacts (default), WhatsApp JSON files (via --whatsapp-json),
-    Instagram JSON files (via --instagram-json), and a merged "same person" view
-    across WeChat+WhatsApp (via --whatsapp-merge NAME=ALIAS). All repeatable.
+    Instagram JSON files (via --instagram-json, all repeatable), and a single
+    combined "same person" section across every source (via --merge).
     """
     import shutil as _sh
 
@@ -1672,20 +1824,12 @@ def _cmd_stats(args, workspace: Path, log) -> int:
     from wxextract.contacts import find_by_alias, load_contacts
     from wxextract.messages import extract
 
-    # ── Validate --whatsapp-merge spec ──────────────────────────────
-    merge_specs: list[tuple[str, str]] = []
-    for spec in getattr(args, "whatsapp_merge", []) or []:
-        if "=" not in spec:
-            print(f"[!] --whatsapp-merge expects NAME=ALIAS, got {spec!r}")
-            return 2
-        name, alias = spec.split("=", 1)
-        merge_specs.append((name.strip(), alias.strip()))
-
     whatsapp_paths = list(getattr(args, "whatsapp_json", []) or [])
     whatsapp_only = bool(getattr(args, "whatsapp_only", False))
     instagram_paths = list(getattr(args, "instagram_json", []) or [])
     instagram_only = bool(getattr(args, "instagram_only", False))
     external_only = whatsapp_only or instagram_only
+    do_merge = bool(getattr(args, "merge", False))
 
     # ── HTML mode detection ─────────────────────────────────────────
     html_mode = (not args.alias) or args.html or bool(args.out) \
@@ -1793,39 +1937,7 @@ def _cmd_stats(args, workspace: Path, log) -> int:
              f"({ig_my_label}'s side) — {len(ig_msgs):,} msgs")
         instagram_pairs.append((ig_contact, ig_msgs))
 
-    # Apply merges: for each NAME=ALIAS spec, pull the matching pair out
-    # of each list and build a combined synthetic pair. Section order:
-    # combined → WhatsApp-only → WeChat-only (consecutive, per merge).
-    merged_groups: list[list[tuple]] = []   # each inner list is a section group
-    unmerged_wa = list(whatsapp_pairs)
-    unmerged_we = list(wechat_pairs)
-    for name, alias in merge_specs:
-        wa_match = next(
-            (pr for pr in unmerged_wa
-             if name.lower() in (pr[0].display_name or "").lower()
-             or name.lower() in (pr[0].alias or "").lower()),
-            None,
-        )
-        we_match = next(
-            (pr for pr in unmerged_we
-             if alias.lower() in (pr[0].alias or "").lower()
-             or alias.lower() in (pr[0].username or "").lower()),
-            None,
-        )
-        if wa_match is None or we_match is None:
-            print(f"[!] --whatsapp-merge {name}={alias}: "
-                  f"{'WhatsApp side ' if wa_match is None else ''}"
-                  f"{'WeChat side ' if we_match is None else ''}"
-                  f"not found, skipping merge.")
-            continue
-        unmerged_wa.remove(wa_match)
-        unmerged_we.remove(we_match)
-        combined_pair = _wa.build_combined(
-            wa_match, we_match,
-            display_name=we_match[0].display_name,
-            alias=f"{alias}_combined",
-        )
-        merged_groups.append([combined_pair, wa_match, we_match])
+    all_pairs = wechat_pairs + whatsapp_pairs + instagram_pairs
 
     # Compute Counts for each pair (using a single my_label so the
     # by_sender counter is consistent across sources)
@@ -1836,31 +1948,29 @@ def _cmd_stats(args, workspace: Path, log) -> int:
 
     final_pairs: list[tuple] = []
     overview_pairs: list[tuple] = []
-    for grp in merged_groups:
-        # grp is [combined_pair, wa_pair, we_pair] — only the combined
-        # entry contributes to the overview to avoid double-counting.
-        for i, p in enumerate(grp):
-            cp = _to_counts(p)
-            if cp[1].total == 0:
-                continue
+
+    # --merge: one combined section (interleaved timeline) on top of the
+    # per-source sections. The combined entry alone feeds the cross-contact
+    # overview to avoid double-counting the same messages.
+    sources_in_overview = True
+    if do_merge and all_pairs:
+        merge_name = getattr(args, "merge_as", None) or all_pairs[0][0].display_name
+        merge_alias = "".join(ch.lower() if ch.isalnum() else "_"
+                              for ch in merge_name).strip("_") or "combined"
+        combined = _wa.build_combined_many(
+            all_pairs, display_name=merge_name, alias=merge_alias)
+        cc = _to_counts(combined)
+        if cc[1].total > 0:
+            final_pairs.append(cc)
+            overview_pairs.append(cc)
+        sources_in_overview = False   # combined already represents them
+
+    for p in all_pairs:
+        cp = _to_counts(p)
+        if cp[1].total > 0:
             final_pairs.append(cp)
-            if i == 0:   # combined
+            if sources_in_overview:
                 overview_pairs.append(cp)
-    for p in unmerged_wa:
-        cp = _to_counts(p)
-        if cp[1].total > 0:
-            final_pairs.append(cp)
-            overview_pairs.append(cp)
-    for p in unmerged_we:
-        cp = _to_counts(p)
-        if cp[1].total > 0:
-            final_pairs.append(cp)
-            overview_pairs.append(cp)
-    for p in instagram_pairs:
-        cp = _to_counts(p)
-        if cp[1].total > 0:
-            final_pairs.append(cp)
-            overview_pairs.append(cp)
 
     if not final_pairs:
         print("[!] no data to render — check "
