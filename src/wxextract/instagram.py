@@ -451,7 +451,7 @@ def load_cookies(*, browser: str | None = None, sessionid: str | None = None,
 
     if browser in (None, "zen"):
         for zf in _zen_cookie_files():
-            got = _try(lambda: bc3.firefox(cookie_file=str(zf), domain_name="instagram.com"))
+            got = _try(lambda zf=zf: bc3.firefox(cookie_file=str(zf), domain_name="instagram.com"))
             if got:
                 return got
         if browser == "zen":
