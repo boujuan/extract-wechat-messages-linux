@@ -154,3 +154,13 @@ def test_live_capture_derives_all_keys():
             except OSError:
                 continue
             assert state != "T", f"thread {task} left stopped by the tracer"
+
+
+# ── ptrace-denied guidance (issue #1) ──────────────────────────────────────
+
+def test_ptrace_guidance_is_actionable():
+    g = pp._ptrace_guidance()
+    assert "ptrace" in g.lower()
+    assert "ptrace_scope" in g           # names the sysctl
+    assert "sudo wxextract keys" in g    # elevate-keys-only alternative
+    assert "sysctl" in g                 # the concrete fix command

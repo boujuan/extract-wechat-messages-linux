@@ -165,16 +165,18 @@ class ScanResult:
     elapsed: float = 0.0
     pids_scanned: list[int] = field(default_factory=list)
     hex_matches: int = 0
+    mem_errors: int = 0                 # regions that couldn't be read (EPERM/EACCES…)
+    last_mem_error: str | None = None   # first such error, for diagnostics
 
 
-def _scan_region(pid: int, region: MemRegion) -> bytes | None:
-    """Read a region from /proc/<pid>/mem; return bytes or None on failure."""
+def _scan_region(pid: int, region: MemRegion) -> tuple[bytes | None, str | None]:
+    """Read a region from /proc/<pid>/mem; return (bytes, error)."""
     try:
         with open(f"/proc/{pid}/mem", "rb", buffering=0) as mem:
             mem.seek(region.start)
-            return mem.read(region.size)
-    except (OSError, ValueError):
-        return None
+            return mem.read(region.size), None
+    except (OSError, ValueError) as e:
+        return None, f"{e}"
 
 
 def _try_keys_against_remaining(
@@ -204,21 +206,29 @@ def scan_pid(
     db_files: list[DbFile],
     remaining_salts: set[str],
     keys_by_salt: dict[str, str],
-) -> int:
-    """Scan one PID's memory; return number of hex matches found (any length)."""
+) -> tuple[int, int, str | None]:
+    """Scan one PID's memory; return (hex matches, unreadable regions, first
+    unreadable-region error). The error count distinguishes "no keys cached"
+    from "memory couldn't be read at all" (ptrace/yama restrictions)."""
     try:
         regions = list_regions(pid)
     except (OSError, PermissionError) as e:
         log.warning(f"PID {pid}: cannot read maps: {e}")
-        return 0
+        return 0, 1, str(e)
     total = sum(r.size for r in regions)
     log.info(f"PID {pid}: {len(regions)} regions, {total / 1024 / 1024:.0f} MB")
     hex_matches = 0
+    mem_errors = 0
+    last_mem_error: str | None = None
     for region in regions:
         if not remaining_salts:
             break
-        data = _scan_region(pid, region)
+        data, err = _scan_region(pid, region)
         if data is None:
+            if err:
+                mem_errors += 1
+                if last_mem_error is None:
+                    last_mem_error = err
             continue
         for m in _HEX_RE.finditer(data):
             hex_matches += 1
@@ -245,7 +255,7 @@ def scan_pid(
             else:
                 # 64-char bare key: brute-test against every remaining salt
                 _try_keys_against_remaining([enc_key], db_files, remaining_salts, keys_by_salt)
-    return hex_matches
+    return hex_matches, mem_errors, last_mem_error
 
 
 def scan(pids: list[int], db_storage: Path) -> ScanResult:
@@ -258,12 +268,18 @@ def scan(pids: list[int], db_storage: Path) -> ScanResult:
     remaining = set(salt_to_rels.keys())
     keys_by_salt: dict[str, str] = {}
     hex_matches = 0
+    mem_errors = 0
+    last_mem_error: str | None = None
     pids_scanned: list[int] = []
     for pid in pids:
         if not remaining:
             break
         pids_scanned.append(pid)
-        hex_matches += scan_pid(pid, db_files, remaining, keys_by_salt)
+        n, errs, first_err = scan_pid(pid, db_files, remaining, keys_by_salt)
+        hex_matches += n
+        mem_errors += errs
+        if last_mem_error is None and first_err:
+            last_mem_error = first_err
     # cross-verify
     if remaining and keys_by_salt:
         log.info(f"cross-verify: {len(remaining)} salts still unresolved")
@@ -280,6 +296,8 @@ def scan(pids: list[int], db_storage: Path) -> ScanResult:
         elapsed=time.time() - t0,
         pids_scanned=pids_scanned,
         hex_matches=hex_matches,
+        mem_errors=mem_errors,
+        last_mem_error=last_mem_error,
     )
 
 

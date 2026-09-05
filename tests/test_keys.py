@@ -73,3 +73,33 @@ def test_verify_enc_key_rejects_wrong_key(db_files, saved_keys):
     enc = bytes.fromhex(saved_keys[db.rel])
     wrong = bytes(b ^ 0xFF for b in enc)
     assert not verify_enc_key(wrong, db.page1)
+
+
+# ── mem-read error accounting (issue #1: silent EPERM looked like "0 keys")
+
+def test_scan_pid_counts_unreadable_regions(monkeypatch, db_files):
+    """When /proc/<pid>/mem can't be read (yama/ptrace restrictions), scan_pid
+    must report the failure instead of silently returning 0 keys."""
+    from wxextract import keys as keys_mod
+
+    region = keys_mod.MemRegion(start=0x1000, size=0x1000, name="anon", hot=False)
+    monkeypatch.setattr(keys_mod, "list_regions", lambda pid: [region])
+    n, errs, first = keys_mod.scan_pid(999999, db_files, {"a" * 32}, {})
+    assert n == 0
+    assert errs == 1
+    assert first is not None and "999999" in first or first  # error text present
+
+
+def test_scan_pid_no_regions_no_errors(monkeypatch, db_files):
+    from wxextract import keys as keys_mod
+
+    monkeypatch.setattr(keys_mod, "list_regions", lambda pid: [])
+    n, errs, first = keys_mod.scan_pid(1, db_files, {"a" * 32}, {})
+    assert (n, errs, first) == (0, 0, None)
+
+
+def test_scan_result_default_error_fields():
+    from wxextract.keys import ScanResult
+
+    r = ScanResult()
+    assert r.mem_errors == 0 and r.last_mem_error is None

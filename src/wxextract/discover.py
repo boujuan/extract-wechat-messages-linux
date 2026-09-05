@@ -7,6 +7,7 @@ stale. We pick whichever location has the most recently modified message DB.
 """
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -28,10 +29,23 @@ class Discovery:
 
 
 _DATA_ROOT_CANDIDATES = (
-    "~/.local/share/WeChat_Data/xwechat_files",
-    "~/Documents/xwechat_files",
-    "~/.var/app/com.tencent.wechat/data/xwechat_files",
+    ".local/share/WeChat_Data/xwechat_files",
+    "Documents/xwechat_files",
+    ".var/app/com.tencent.wechat/data/xwechat_files",
 )
+
+
+def _data_root_candidates() -> list[Path]:
+    """Absolute data-root candidates: every home-relative location under
+    Path.home() — plus the invoking user's home first when running under
+    sudo (sudo resets HOME to /root, which would hide the user's data)."""
+    homes = [Path.home()]
+    if os.geteuid() == 0:
+        from .util import sudo_user_home
+        sudo_home = sudo_user_home()
+        if sudo_home is not None and sudo_home != Path.home():
+            homes.insert(0, sudo_home)
+    return [h / rel for h in homes for rel in _DATA_ROOT_CANDIDATES]
 
 
 def _query_pacman_version() -> str | None:
@@ -109,13 +123,13 @@ def _newest_message_mtime(root: Path) -> float:
 
 def find_data_root() -> Path:
     """Return the path most likely to be the active xwechat_files root."""
-    expanded = [Path(p).expanduser() for p in _DATA_ROOT_CANDIDATES]
-    scored = [(p, _newest_message_mtime(p)) for p in expanded]
+    candidates = _data_root_candidates()
+    scored = [(p, _newest_message_mtime(p)) for p in candidates]
     scored.sort(key=lambda kv: kv[1], reverse=True)
     if not scored or scored[0][1] == 0.0:
         raise RuntimeError(
             "no WeChat data root found. Looked under:\n  "
-            + "\n  ".join(str(p) for p in expanded)
+            + "\n  ".join(str(p) for p in candidates)
         )
     return scored[0][0]
 

@@ -6,6 +6,42 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-09-06
+
+Fixes for [#1](https://github.com/boujuan/extract-wechat-messages-linux/issues/1):
+`sudo wxextract` couldn't find the WeChat data, and ptrace denials were
+silent / unactionable.
+
+### Added
+
+- **`wxextract keys` subcommand** — run the key-recovery chain only
+  (validated cache → cached passphrase → memory scan → one-time capture)
+  and write `all_keys.json` + `passphrase.json`, without snapshot /
+  decrypt / render. Designed for restricted systems: `sudo wxextract keys`
+  elevates *only* the key step; afterwards run wxextract normally as your
+  own user.
+- **sudo-aware discovery and workspace** — when running as root via sudo,
+  data-root candidates and the default workspace now resolve against the
+  invoking user's home (`SUDO_USER`/`SUDO_UID`), and every artifact the
+  elevated run writes (`all_keys.json`, `passphrase.json`, `snapshot/`,
+  `plain_dbs/`) is chowned back to that user. `sudo wxextract` no longer
+  dies with "no WeChat data root found. Looked under: /root/…".
+- **Actionable ptrace diagnostics** — a memory scan that can't read
+  `/proc/<pid>/mem` now reports how many regions were unreadable and why,
+  instead of looking like "0 keys in memory"; a denied `PTRACE_ATTACH`
+  during passphrase capture raises an error that names
+  `kernel.yama.ptrace_scope` (with its current value) and the fixes:
+  `sudo sysctl kernel.yama.ptrace_scope=0`, a sysctl.d drop-in, or
+  `sudo wxextract keys`.
+
+### Fixed
+
+- `sudo wxextract` (all commands) previously failed at discovery because
+  `$HOME` pointed at `/root`; this was the exact traceback in issue #1's
+  follow-up. [#1]
+
+[0.10.1]: https://github.com/boujuan/extract-wechat-messages-linux/compare/v0.10.0...v0.10.1
+
 ## [0.10.0] - 2026-09-05
 
 WeChat 4.1.13 support — the key-recovery rewrite. WeChat 4.1
@@ -66,7 +102,7 @@ single 32-byte **WCDB passphrase** and derives every per-DB key from it.
   the target — earlier builds could leave a WeChat thread job-stopped,
   freezing the UI after login (greyed-out "entering" window).
 
-[Unreleased]: https://github.com/boujuan/extract-wechat-messages-linux/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/boujuan/extract-wechat-messages-linux/compare/v0.10.1...HEAD
 [0.10.0]: https://github.com/boujuan/extract-wechat-messages-linux/compare/v0.9.1...v0.10.0
 
 ## [0.9.1] - 2026-06-09

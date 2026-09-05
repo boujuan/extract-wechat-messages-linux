@@ -15,6 +15,55 @@ def _xdg_data_home() -> Path:
     return Path.home() / ".local" / "share"
 
 
+def invoking_sudo_user() -> str | None:
+    """The user behind `sudo`, or None.
+
+    Only meaningful when running as root via sudo (env_reset strips the
+    caller's environment except SUDO_USER/SUDO_UID/SUDO_GID).
+    """
+    if os.geteuid() != 0:
+        return None
+    user = os.environ.get("SUDO_USER", "").strip()
+    return user if user and user != "root" else None
+
+
+def sudo_user_home() -> Path | None:
+    """Home directory of the user behind `sudo`, or None."""
+    user = invoking_sudo_user()
+    if user is None:
+        return None
+    try:
+        import pwd
+        return Path(pwd.getpwnam(user).pw_dir)
+    except (ImportError, KeyError, OSError):
+        return Path("/home") / user
+
+
+def chown_to_invoking_user(path: Path) -> None:
+    """Recursively chown `path` to the invoking user (SUDO_UID/SUDO_GID).
+
+    No-op when not running as root via sudo. Files created under `sudo`
+    would otherwise be root-owned and break later unprivileged runs
+    (snapshot/decrypt caches, key caches).
+    """
+    uid_s = os.environ.get("SUDO_UID", "").strip()
+    if os.geteuid() != 0 or not uid_s:
+        return
+    gid_s = os.environ.get("SUDO_GID", "").strip() or uid_s
+    try:
+        uid, gid = int(uid_s), int(gid_s)
+    except ValueError:
+        return
+    targets = [path]
+    if path.is_dir():
+        targets += sorted(path.rglob("*"))
+    for p in targets:
+        try:
+            os.chown(p, uid, gid)
+        except OSError:
+            pass
+
+
 def _looks_like_source_checkout(util_path: Path) -> bool:
     """True if running from an editable source clone (project root has
     pyproject.toml three levels above this file)."""
@@ -31,6 +80,10 @@ def default_workspace() -> Path:
        (editable install / ``uv run`` inside the cloned repo)
     4. ``$XDG_DATA_HOME/wxextract/`` — typically ``~/.local/share/wxextract/``
        — when installed system-wide (``uv tool install``, ``pipx``, ``pip``)
+
+    Under ``sudo`` the workspace maps to the invoking user's home instead
+    of /root, so an elevated key-recovery run lands in the same workspace
+    the user's normal runs use.
     """
     env = os.environ.get("WXE_WORKSPACE")
     if env:
@@ -38,6 +91,9 @@ def default_workspace() -> Path:
     here = Path(__file__)
     if _looks_like_source_checkout(here):
         return (here.resolve().parent.parent.parent / "workspace").resolve()
+    if invoking_sudo_user() is not None and not os.environ.get("XDG_DATA_HOME", "").strip():
+        home = sudo_user_home() or Path.home()
+        return (home / ".local" / "share" / "wxextract").resolve()
     return (_xdg_data_home() / "wxextract").resolve()
 
 
