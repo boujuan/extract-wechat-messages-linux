@@ -15,6 +15,20 @@ encryption keys was first published (to our knowledge in the form we use) by:
   ground-up re-implementation from those publicly observable parameters and
   the published SQLCipher 4 specification.
 
+The WeChat ≥ 4.1 **passphrase-capture** approach (WeChat stopped caching
+raw keys in memory) follows the public work of:
+
+- **[TANGandXUE/wcdb-key-tool](https://github.com/TANGandXUE/wcdb-key-tool)**
+  (MIT) — first documented, for Linux/macOS/Windows, that WeChat 4.1+
+  keeps only a passphrase; that it flows through the WCDB cipher-config
+  function at login; that the ELF anchor string
+  `com.Tencent.WCDB.Config.Cipher` plus xref analysis locates that
+  function; and that per-DB keys derive via
+  PBKDF2-HMAC-SHA512(passphrase, salt, 256 000 iter). `wxextract`
+  implements the same technique natively — pure `ptrace(2)` via ctypes
+  (their Linux route shells out to gdb), with the hook offset re-derived
+  from the ELF on every capture so WeChat updates are survived.
+
 ## References
 
 - **SQLCipher 4** — <https://www.zetetic.net/sqlcipher/sqlcipher-api/>

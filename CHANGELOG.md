@@ -6,6 +6,69 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-09-05
+
+WeChat 4.1.13 support — the key-recovery rewrite. WeChat 4.1
+(the 4.1.1x series shipped via AUR `wechat-bin` 4.1.13.9) stopped
+caching raw SQLCipher keys in process memory, which broke the
+`x'<hex>'` memory scan (0 keys recovered). wxextract now recovers a
+single 32-byte **WCDB passphrase** and derives every per-DB key from it.
+
+### Added
+
+- **`src/wxextract/passphrase.py`** — the new key source for WeChat ≥ 4.1:
+  - *Hook discovery*: static ELF analysis of the WeChat binary (anchor
+    `com.Tencent.WCDB.Config.Cipher` → xref chain → cipher-config
+    function), re-derived on every capture so WeChat updates are survived.
+  - *Live capture*: launches WeChat through its normal launcher and
+    `PTRACE_ATTACH`es the fresh process (pure `ptrace(2)` via ctypes —
+    **no gdb dependency**), patches `INT3` at the hook, and reads the
+    passphrase from the argument registers when WeChat performs its
+    login-time key setup. The candidate is validated on the spot against
+    a known DB's page-1 HMAC, the instruction is restored, the thread is
+    single-stepped, and the tracer detaches leaving WeChat healthy.
+  - *Steady-state derivation*: `PBKDF2-HMAC-SHA512(passphrase, salt,
+    256000)` per DB + page-1 HMAC validation, parallel across CPUs —
+    **~320 ms for 23 databases**, self-healing when WeChat re-keys a DB
+    or adds a new one (4.1.13 re-keyed `message_resource.db` and added
+    `chatbot`/`weclaw`/`solitaire` DBs; the old static key cache cannot
+    cover those, the passphrase can).
+  - Passphrase cached at `workspace/passphrase.json` (mode 600) and
+    reused on every run — capture is **one-time** and survives WeChat
+    restarts/upgrades until WeChat rotates the passphrase.
+- Keys-stage fallback chain in `run`/`resnap`: cached validated keys →
+  cached passphrase (derive, <1 s) → legacy `x'…'` memory scan
+  (WeChat ≤ 4.1.12, only while WeChat is running) → one-time live
+  capture. The capture stage prints an explicit "press the green
+  Enter/Log in button" instruction; the tracer waits up to 150 s.
+- **`lifecycle.stop_portable_services()`** — the AUR `wechat` package's
+  `portable` launcher runs the sandbox under transient systemd user
+  units (`app-portable-com.qq.weixin-*.service`) that can re-spawn
+  WeChat after an abnormal death; `close_wechat()` now stops those units
+  as a fallback so "closed" actually stays closed.
+- `wxextract status` shows the passphrase cache; `wxextract cleanup
+  --keys` also wipes `passphrase.json`.
+- `tests/test_passphrase.py` — synthetic SQLCipher page-1 round-trips
+  (derivation/validation, serial == parallel), cache roundtrip + perms,
+  hook discovery against the real binary, and an opt-in live-capture
+  test (`WXE_TEST_LIVE_CAPTURE=1` + `WXE_TEST_DB_STORAGE=…`).
+
+### Changed
+
+- The memory scan no longer auto-launches WeChat when it isn't running:
+  on WeChat ≥ 4.1 that launch could never yield keys (they only enter
+  memory at the login button press); the capture path performs the
+  launch instead.
+
+### Fixed
+
+- Capture teardown now drains every pending ptrace stop and SIGCONTs
+  the target — earlier builds could leave a WeChat thread job-stopped,
+  freezing the UI after login (greyed-out "entering" window).
+
+[Unreleased]: https://github.com/boujuan/extract-wechat-messages-linux/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/boujuan/extract-wechat-messages-linux/compare/v0.9.1...v0.10.0
+
 ## [0.9.1] - 2026-06-09
 
 ### Changed
@@ -112,7 +175,6 @@ Packaging fixes for AUR submission.
   package guidelines; `LICENSE` installed to
   `/usr/share/licenses/$pkgname/`.
 
-[Unreleased]: https://github.com/boujuan/extract-wechat-messages-linux/compare/v0.9.1...HEAD
 [0.9.1]: https://github.com/boujuan/extract-wechat-messages-linux/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/boujuan/extract-wechat-messages-linux/compare/v0.8.1...v0.9.0
 [0.8.1]: https://github.com/boujuan/extract-wechat-messages-linux/compare/v0.8.0...v0.8.1

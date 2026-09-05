@@ -257,6 +257,7 @@ with the tool).
 |---|---|---|
 | Snapshot freshness | `message_0..3.db` + `contact.db` mtime+size match live | Skip close / snap / decrypt / relaunch entirely (~1 s total run) |
 | Key cache | `workspace/all_keys.json` exists AND every saved key validates page-1 HMAC against the current live DBs | Skip the memory scan |
+| Passphrase cache | `workspace/passphrase.json` exists | Derive per-DB keys (incl. new/re-keyed DBs) in ~320 ms — no scan, no capture |
 | Decrypt | per-DB: skip if `plain_dbs/X.db` is newer than the source | Re-decrypt only changed DBs |
 | Snapshot | `rsync -aH --delete` | Only changed files copied |
 
@@ -380,12 +381,19 @@ size / lines / words / tokens / days plus a TOTAL row. Disable with
 ```
 discover ── locate ~/.local/share/WeChat_Data/xwechat_files/<wxid>/
    │
-lifecycle ── while WeChat is running, extract SQLCipher keys from /proc/<pid>/mem
+lifecycle ── recover the account's SQLCipher key material
+   │         ├─ WeChat ≤ 4.1.12: scan /proc/<pid>/mem for x'…' raw-key
+   │         │   literals (validated per-page HMAC-SHA512)
+   │         └─ WeChat ≥ 4.1: capture the 32-byte WCDB *passphrase* once
+   │             (ptrace breakpoint at the WCDB cipher-config function,
+   │             fired when you press the green "Enter/Log in" button),
+   │             then PBKDF2-HMAC-SHA512(passphrase, per-DB salt, 256k
+   │             iter) → every DB key, ~320 ms for 23 DBs, cached
+   │             in workspace/passphrase.json (mode 600)
    │
-key scan ── regex x'…' candidates, validate each via per-page HMAC-SHA512
-   │       (SQLCipher 4: AES-256-CBC, PBKDF2-HMAC-SHA512 256 000 iter)
-   │
-close ──── SIGTERM, poll for clean exit (≤10 s, fallback prompt)
+close ──── SIGTERM, poll for clean exit (≤10 s, fallback prompt);
+   │        stops the portable launcher's systemd user units if the
+   │        sandbox supervisor re-spawns WeChat
    │
 snapshot ── rsync -aH workspace/snapshot/<account>/
    │
@@ -407,6 +415,34 @@ chunk ──── month / week / day / tokens:N
    │
 report ──── stats compute + Plotly HTML render (interactive dashboard)
 ```
+
+### WeChat 4.1.13+ key recovery (one-time, ~25 s; ~320 ms ever after)
+
+WeChat 4.1 stopped caching raw SQLCipher keys in memory — the old scan
+returns 0 keys. The replacement has two phases:
+
+1. **One-time capture.** wxextract closes WeChat, relaunches it under a
+   pure-`ptrace` tracer (no gdb needed), and arms a breakpoint at the
+   WCDB cipher-config function (its offset is found by static ELF
+   analysis on every run, so WeChat updates don't break it). **When the
+   WeChat login window appears, press the green "Enter/Log in" button**
+   — that button press is exactly what triggers WeChat's key setup, and
+   the breakpoint captures the 32-byte passphrase from the function's
+   arguments at that moment (validated immediately against your
+   databases' page-1 HMACs). The tracer detaches cleanly and WeChat
+   continues logging in normally. The passphrase is cached at
+   `workspace/passphrase.json` (mode 600 — treat it like the keys).
+2. **Every subsequent run.** Keys are derived from the cached
+   passphrase + each database's salt (PBKDF2-HMAC-SHA512, 256 000
+   iterations, parallel) and HMAC-validated — about 320 ms for ~23
+   databases, with no WeChat restart and no interaction. This also
+   self-heals whenever WeChat re-keys a database or ships a new one
+   (4.1.13 re-keyed `message_resource.db` and added new DBs — a static
+   key cache goes stale, the passphrase doesn't).
+
+If WeChat rotates the passphrase (e.g. a logout/login on another
+device invalidates it), wxextract detects the derivation failure and
+automatically falls back to a fresh capture.
 
 ## Tests
 
@@ -433,6 +469,7 @@ The workspace directory holds everything wxextract produces:
 ```
 workspace/
 ├── all_keys.json         (chmod 600 — recovered SQLCipher keys; treat as sensitive)
+├── passphrase.json       (chmod 600 — WCDB passphrase, WeChat ≥4.1; as sensitive as the keys)
 ├── image_key.json        (V2 image AES key, when cached)
 ├── snapshot_stats.json   (per-shard row counts; drift detection baseline)
 ├── last_extract.json     (per-contact --since-last baselines)
@@ -459,12 +496,15 @@ else stays in the workspace.
 
 ## Limitations
 
-- Linux only. The key-extraction `/proc/<pid>/mem` path is Linux-specific;
-  Windows / macOS support would need different scanners.
+- Linux only. The key-recovery `/proc/<pid>/mem` scan and `ptrace`
+  passphrase capture are Linux-specific; Windows / macOS support would
+  need different scanners.
 - 1-on-1 chats only for now (group chats / bizchat deferred).
-- Memory-key extraction needs WeChat to be running and at least one account
-  logged in *and past the "Open WeChat" dialog* — keys aren't cached until
-  chats actually load. If `/proc/<pid>/mem` is blocked (e.g. tightened
+- On WeChat ≥ 4.1 the one-time passphrase capture needs you to press
+  the green "Enter/Log in" button in the WeChat window while the tracer
+  waits (up to 150 s) — the keys are only set up at that moment. Every
+  later run uses the cached passphrase with no interaction. If
+  `ptrace` of your own processes is blocked (tightened
   `kernel.yama.ptrace_scope`), fall back to `sudo`.
 - Token counts use `tiktoken cl100k_base` — a good ±5 % proxy for Claude
   models, not exact.

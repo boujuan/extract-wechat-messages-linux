@@ -669,9 +669,12 @@ def _cmd_status(workspace: Path) -> int:
     snap_acct = _snapshot_account_dir(workspace)
     plain = workspace / "plain_dbs"
     keys = workspace / "all_keys.json"
+    pass_path = workspace / "passphrase.json"
     print(f"snapshot         : {snap_acct if snap_acct and snap_acct.exists() else '<none>'}")
     print(f"plain_dbs        : {'exists' if plain.is_dir() else '<none>'}")
     print(f"keys             : {'exists' if keys.is_file() else '<none>'}")
+    print(f"passphrase       : {'cached' if pass_path.is_file() else '<none>'}"
+          f"{' (WeChat ≥4.1 key source)' if pass_path.is_file() else ''}")
     return 0
 
 
@@ -1064,60 +1067,133 @@ def _cmd_resnap(workspace: Path, force: bool = False, no_relaunch: bool = False,
     if ui and ui.stages["Keys"].status not in ("done", "skipped"):
         ui.begin("Keys", "validating cached keys vs live DBs")
     cached = None if force else _cached_keys_still_valid(keys_path, d.db_storage())
+    keys_by_rel: dict[str, str] = {}
     if cached is not None:
         log.info(f"keys: reusing {len(cached)} cached keys from {keys_path.name} (validated against live DBs)")
         if ui:
             ui.end("Keys", f"{len(cached)} cached keys validated against live")
         keys_by_rel = cached
     else:
-        if ui:
-            ui.begin("Keys", "scanning /proc/<pid>/mem for SQLCipher keys")
-        # need WeChat running to scan memory
-        if not lifecycle.wechat_running():
-            log.info("wechat not running — launching for key extraction")
-            lifecycle.launch_wechat(cmd=d.launch_cmd or None)
-            time.sleep(8)
-        pids = []
-        bin_str = str(d.binary_path) if d.binary_path else None
-        mp = lifecycle.main_wechat_pid(binary=bin_str)
-        if mp:
-            pids.append(mp)
-        pids += [p for p in lifecycle.wechat_running() if p != mp]
-        scan_res = scan(pids, d.db_storage())
-        log.info(f"keys: {len(scan_res.keys_by_rel)} / {len(scan_res.salt_to_rels)} via memory scan in {scan_res.elapsed:.2f}s")
-        # 0/N is almost always "WeChat is at the Open WeChat dialog" → offer to wait + retry
-        if len(scan_res.keys_by_rel) == 0 and len(scan_res.salt_to_rels) > 0 and sys.stdin.isatty():
-            log.warning("0 keys recovered — WeChat is likely at the 'Open WeChat' login-confirm dialog.")
-            log.warning("If you click that green 'Open WeChat' button now, the keys will load into memory.")
-            for attempt in range(1, 4):
-                try:
-                    input(f"Press Enter to retry (attempt {attempt}/3), or Ctrl+C to abort: ")
-                except (EOFError, KeyboardInterrupt):
-                    print()
-                    return 3
-                time.sleep(1.5)
+        from datetime import datetime
+
+        from wxextract import passphrase as passphrase_mod
+        from wxextract.keys import ScanResult
+
+        db_files, salt_to_rels = collect_dbs(d.db_storage())
+        n_salts = len(salt_to_rels)
+        pass_path = workspace / "passphrase.json"
+
+        # ── 1. cached passphrase: derive per-DB keys + HMAC-validate (~0.4 s).
+        #      WeChat ≥ 4.1 path — survives re-keyed/new DBs without WeChat.
+        ph = None if force else passphrase_mod.load_passphrase(pass_path)
+        if ph is not None:
+            if ui:
+                ui.begin("Keys", "deriving keys from cached passphrase")
+            t0 = time.time()
+            derived = passphrase_mod.derive_keys(ph, db_files)
+            if len(derived) == len(db_files):
+                log.info(f"keys: derived {len(derived)}/{len(db_files)} from cached passphrase in {time.time() - t0:.2f}s")
+                save_keys(ScanResult(keys_by_rel=derived, salt_to_rels=salt_to_rels),
+                          db_files, d.db_storage(), keys_path)
+                keys_by_rel = derived
+                if ui:
+                    ui.end("Keys", f"{len(derived)} keys derived from cached passphrase ({time.time() - t0:.1f}s)")
+            else:
+                log.warning(f"cached passphrase only validates {len(derived)}/{len(db_files)} DBs — stale; recapturing")
+                if ui:
+                    ui.fail("Keys", "cached passphrase stale — recapturing")
+
+        if not keys_by_rel:
+            # ── 2. legacy memory scan for x'…' literals (WeChat ≤ 4.1.12)
+            scan_res = None
+            if lifecycle.wechat_running():
+                if ui:
+                    ui.begin("Keys", "scanning /proc/<pid>/mem for SQLCipher keys")
+                bin_str = str(d.binary_path) if d.binary_path else None
                 pids = []
                 mp = lifecycle.main_wechat_pid(binary=bin_str)
                 if mp:
                     pids.append(mp)
                 pids += [p for p in lifecycle.wechat_running() if p != mp]
                 scan_res = scan(pids, d.db_storage())
-                log.info(f"retry {attempt}: keys {len(scan_res.keys_by_rel)} / {len(scan_res.salt_to_rels)}")
-                if len(scan_res.keys_by_rel) == len(scan_res.salt_to_rels):
-                    break
-        if len(scan_res.keys_by_rel) < len(scan_res.salt_to_rels):
-            log.error(
-                f"could not recover all keys ({len(scan_res.keys_by_rel)}/{len(scan_res.salt_to_rels)})"
-            )
-            if scan_res.keys_by_rel == {}:
-                log.error("0 keys found — WeChat is probably at the 'Open WeChat' login-confirm "
-                          "dialog. Click that button so chats actually load, then re-run.")
-            return 3
-        db_files, _ = collect_dbs(d.db_storage())
-        save_keys(scan_res, db_files, d.db_storage(), keys_path)
-        keys_by_rel = load_keys(keys_path)
-        if ui:
-            ui.end("Keys", f"{len(scan_res.keys_by_rel)} keys recovered via memory scan in {scan_res.elapsed:.2f}s")
+                log.info(f"keys: {len(scan_res.keys_by_rel)} / {n_salts} via memory scan in {scan_res.elapsed:.2f}s")
+                # 0/N is almost always "WeChat is at the Open WeChat dialog" → offer to wait + retry
+                if len(scan_res.keys_by_rel) == 0 and n_salts > 0 and sys.stdin.isatty():
+                    log.warning("0 keys recovered — WeChat is likely at the 'Open WeChat' login-confirm dialog.")
+                    log.warning("If you click that green 'Open WeChat' button now, the keys will load into memory.")
+                    for attempt in range(1, 4):
+                        try:
+                            input(f"Press Enter to retry (attempt {attempt}/3), or Ctrl+C to abort: ")
+                        except (EOFError, KeyboardInterrupt):
+                            print()
+                            return 3
+                        time.sleep(1.5)
+                        pids = []
+                        mp = lifecycle.main_wechat_pid(binary=bin_str)
+                        if mp:
+                            pids.append(mp)
+                        pids += [p for p in lifecycle.wechat_running() if p != mp]
+                        scan_res = scan(pids, d.db_storage())
+                        log.info(f"retry {attempt}: keys {len(scan_res.keys_by_rel)} / {n_salts}")
+                        if len(scan_res.keys_by_rel) == n_salts:
+                            break
+                if scan_res.keys_by_rel and len(scan_res.keys_by_rel) == n_salts:
+                    save_keys(scan_res, db_files, d.db_storage(), keys_path)
+                    keys_by_rel = load_keys(keys_path)
+                    if ui:
+                        ui.end("Keys", f"{len(scan_res.keys_by_rel)} keys recovered via memory scan in {scan_res.elapsed:.2f}s")
+
+        if not keys_by_rel:
+            # ── 3. live passphrase capture (WeChat ≥ 4.1.13): launch WeChat
+            #      under a ptrace tracer, grab the WCDB passphrase at login.
+            #      One-time — the passphrase is cached and reused by path 1.
+            if not d.binary_path or not Path(d.binary_path).is_file():
+                log.error(f"no WeChat binary at {d.binary_path!r} — cannot capture keys")
+                return 3
+            try:
+                hook_off = passphrase_mod.find_hook_offset(Path(d.binary_path))
+            except passphrase_mod.HookNotFoundError as e:
+                log.error(f"cannot locate the WCDB cipher hook in {d.binary_path}: {e}")
+                log.error("this WeChat build is newer than wxextract supports — "
+                          "please open an issue: https://github.com/boujuan/extract-wechat-messages-linux/issues")
+                return 3
+            if ui:
+                ui.begin("Keys", "one-time passphrase capture (WeChat restarts)")
+            if lifecycle.wechat_running():
+                log.info("closing WeChat for the one-time passphrase capture")
+                if not lifecycle.close_wechat(binary=str(d.binary_path)):
+                    log.warning("WeChat did not close cleanly; attempting capture anyway")
+            log.info(">> ACTION NEEDED: when the WeChat login window appears, press the "
+                     "green 'Enter/Log in' button — the key capture fires at that moment.")
+            try:
+                ph_new = passphrase_mod.capture_passphrase(
+                    Path(d.binary_path), timeout=150.0,
+                    probe_page1=db_files[0].page1 if db_files else None,
+                    launch_cmd=d.launch_cmd or None,
+                )
+            except passphrase_mod.CaptureError as e:
+                log.error(f"passphrase capture failed: {e}")
+                if scan_res is not None and scan_res.keys_by_rel:
+                    log.error("memory scan also found no usable keys on this WeChat build")
+                else:
+                    log.error("if a QR-code login was showing, run again and scan it while capture waits")
+                return 3
+            passphrase_mod.save_passphrase(pass_path, passphrase_mod.PassphraseInfo(
+                passphrase=ph_new, binary=str(d.binary_path), hook_off=hook_off,
+                captured_at=datetime.now().isoformat(timespec="seconds"),
+            ))
+            derived = passphrase_mod.derive_keys(ph_new, db_files)
+            if len(derived) < n_salts:
+                missing = n_salts - len(derived)
+                log.warning(f"passphrase keyed {len(derived)}/{n_salts} DBs ({missing} remain unkeyed)")
+            if not derived:
+                log.error("passphrase was captured but derives no valid keys — please report this")
+                return 3
+            save_keys(ScanResult(keys_by_rel=derived, salt_to_rels=salt_to_rels),
+                      db_files, d.db_storage(), keys_path)
+            keys_by_rel = derived
+            if ui:
+                ui.end("Keys", f"passphrase captured (cached); {len(derived)}/{n_salts} keys derived")
 
     # ── CLOSE → SNAPSHOT → DECRYPT ────────────────────────────────────────────
     if ui:
@@ -1706,6 +1782,7 @@ def _cmd_cleanup(args, workspace: Path, log) -> int:
     _consider("media",     workspace / "media",               "decrypted images",            args.media)
     _consider("keys",      workspace / "all_keys.json",       "SQLCipher DB keys",           args.keys)
     _consider("keys",      workspace / "image_key.json",      "V2 image AES key",            args.keys)
+    _consider("keys",      workspace / "passphrase.json",     "WCDB passphrase (WeChat ≥4.1)", args.keys)
     _consider("state",     workspace / "last_extract.json",   "per-contact --since-last baselines", args.state)
     _consider("state",     workspace / "snapshot_stats.json", "drift-detection baseline",    args.state)
     _consider("cache",     xdg_cache,                          "XDG cache (update check)",    args.cache)

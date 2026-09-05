@@ -99,6 +99,37 @@ def _all_dead(pids: list[int]) -> bool:
     return True
 
 
+def stop_portable_services(timeout: float = 8.0) -> bool:
+    """Stop the transient systemd user units of the AUR ``wechat`` package's
+    ``portable`` launcher (``app-portable-com.qq.weixin-*.service`` and its
+    D-Bus proxy units). On that packaging the sandbox is supervised by
+    systemd, which can re-spawn WeChat after an abnormal death — stopping
+    the units is the only reliable close. Returns True if any unit was
+    stopped (or systemctl isn't present)."""
+    import shutil
+    import subprocess
+    if shutil.which("systemctl") is None:
+        return True
+    try:
+        proc = subprocess.run(
+            ["systemctl", "--user", "list-units", "--plain", "--no-legend",
+             "app-portable-com.qq.weixin-*.service", "WeChat-*-dbus.service"],
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    units = [line.split()[0] for line in proc.stdout.splitlines() if line.strip()]
+    if not units:
+        return True
+    log.info(f"stopping portable systemd units: {', '.join(units)}")
+    try:
+        subprocess.run(["systemctl", "--user", "stop", *units],
+                       capture_output=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return True
+
+
 def close_wechat(timeout: float = 10.0, poll: float = 0.25,
                  binary: str | None = None) -> bool:
     """Send SIGTERM to the main WeChat process; wait for the whole group to exit.
@@ -128,6 +159,14 @@ def close_wechat(timeout: float = 10.0, poll: float = 0.25,
     while time.time() < deadline:
         if not wechat_running():
             log.info("wechat fully closed")
+            return True
+        time.sleep(poll)
+    # portable/systemd packaging: stop the supervising user units and re-check
+    stop_portable_services()
+    deadline = time.time() + 4.0
+    while time.time() < deadline:
+        if not wechat_running():
+            log.info("wechat fully closed (systemd units stopped)")
             return True
         time.sleep(poll)
     remaining = wechat_running()
