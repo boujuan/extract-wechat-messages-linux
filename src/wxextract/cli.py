@@ -62,7 +62,9 @@ _EPILOG = (
     "  [cyan]wxextract render --alias X --whatsapp-json w.json --merge[/]      "
     "[dim]fuse sources into one timeline[/]\n"
     "  [cyan]wxextract resnap --no-relaunch[/]                          "
-    "[dim]refresh data, keep WeChat closed[/]\n\n"
+    "[dim]refresh data, keep WeChat closed[/]\n"
+    "  [cyan]sudo wxextract keys[/]                                     "
+    "[dim]recover keys only (then re-run without sudo)[/]\n\n"
     "[bold yellow]Updating[/]\n"
     "  [cyan]uv tool upgrade wxextract[/]                               "
     "[dim]pull the latest release from GitHub (uv installs)[/]\n"
@@ -222,6 +224,19 @@ def build_parser() -> argparse.ArgumentParser:
                           help="Bypass all caches: re-extract keys and re-decrypt every DB.")
     g_resnap.add_argument("--no-relaunch", action="store_true",
                           help="Don't re-launch WeChat afterwards (avoids the login-confirm dialog).")
+
+    sp = sub.add_parser("keys",
+                        help="Recover SQLCipher keys only (no snapshot/decrypt/render).",
+                        description="Run the key-recovery chain (validated cache → cached "
+                                    "passphrase → memory scan → one-time passphrase capture) "
+                                    "and write all_keys.json + passphrase.json, then exit. "
+                                    "Designed to run under sudo when ptrace is restricted: "
+                                    "sudo wxextract keys — afterwards run wxextract normally "
+                                    "as your own user.",
+                        formatter_class=Formatter)
+    g_keys = sp.add_argument_group("Pipeline behavior")
+    g_keys.add_argument("--force", action="store_true",
+                        help="Bypass caches: re-scan / re-capture even if valid keys exist.")
 
     sp = sub.add_parser("cleanup",
                         help="Delete cached workspace data (snapshot, decrypted DBs, "
@@ -612,6 +627,8 @@ def _main(argv: list[str] | None = None) -> int:
             return _cmd_resnap(workspace, force=getattr(args, "force", False),
                                no_relaunch=getattr(args, "no_relaunch", False),
                                account_dir=_account_dir_arg(args), ui=ui)
+        if cmd == "keys":
+            return _cmd_keys(args, workspace, log)
         if cmd == "render":
             return _cmd_render(args, workspace, log, ui=ui)
         if cmd == "preview":
@@ -645,7 +662,11 @@ def _main(argv: list[str] | None = None) -> int:
 
 def _cmd_status(workspace: Path) -> int:
     from wxextract import discover, lifecycle
+    from wxextract.util import invoking_sudo_user
     print(f"wxextract {__version__}")
+    sudo_user = invoking_sudo_user()
+    if sudo_user is not None:
+        print(f"sudo context     : running as root via sudo (user {sudo_user})")
     print(f"workspace        : {workspace}")
     try:
         d = discover.discover()
@@ -998,13 +1019,177 @@ def _cached_keys_still_valid(keys_path: Path, db_storage: Path) -> dict[str, str
     return saved
 
 
+class _KeysError(RuntimeError):
+    """Key recovery failed; the message is user-facing (already logged)."""
+
+
+def _recover_keys(d, workspace: Path, ui=None, force: bool = False) -> dict[str, str]:
+    """Full key-recovery fallback chain. Returns {rel_path: enc_key_hex} or
+    raises _KeysError with a user-facing message.
+
+    1. validated ``all_keys.json`` cache
+    2. cached passphrase → derive + HMAC-validate every DB key (~0.4 s)
+       [WeChat ≥ 4.1]
+    3. legacy ``x'…'`` memory scan (only while WeChat is running)
+       [WeChat ≤ 4.1.12]
+    4. one-time live passphrase capture via ptrace (then cached for #2)
+       [WeChat ≥ 4.1]
+    """
+    import logging
+    from datetime import datetime
+
+    from wxextract import lifecycle
+    from wxextract import passphrase as passphrase_mod
+    from wxextract.keys import ScanResult, collect_dbs, load_keys, save_keys, scan
+    from wxextract.util import chown_to_invoking_user
+
+    log = logging.getLogger("wxextract.keys")
+    keys_path = workspace / "all_keys.json"
+    pass_path = workspace / "passphrase.json"
+
+    if ui and ui.stages["Keys"].status not in ("done", "skipped"):
+        ui.begin("Keys", "validating cached keys vs live DBs")
+    cached = None if force else _cached_keys_still_valid(keys_path, d.db_storage())
+    if cached is not None:
+        log.info(f"keys: reusing {len(cached)} cached keys from {keys_path.name} (validated against live DBs)")
+        if ui:
+            ui.end("Keys", f"{len(cached)} cached keys validated against live")
+        return cached
+
+    db_files, salt_to_rels = collect_dbs(d.db_storage())
+    n_salts = len(salt_to_rels)
+
+    # ── 1. cached passphrase: derive per-DB keys + HMAC-validate (~0.4 s).
+    #      WeChat ≥ 4.1 path — survives re-keyed/new DBs without WeChat.
+    ph = None if force else passphrase_mod.load_passphrase(pass_path)
+    if ph is not None:
+        if ui:
+            ui.begin("Keys", "deriving keys from cached passphrase")
+        t0 = time.time()
+        derived = passphrase_mod.derive_keys(ph, db_files)
+        if len(derived) == len(db_files) and db_files:
+            log.info(f"keys: derived {len(derived)}/{len(db_files)} from cached passphrase in {time.time() - t0:.2f}s")
+            save_keys(ScanResult(keys_by_rel=derived, salt_to_rels=salt_to_rels),
+                      db_files, d.db_storage(), keys_path)
+            chown_to_invoking_user(keys_path)
+            if ui:
+                ui.end("Keys", f"{len(derived)} keys derived from cached passphrase ({time.time() - t0:.1f}s)")
+            return derived
+        log.warning(f"cached passphrase only validates {len(derived)}/{len(db_files)} DBs — stale; recapturing")
+        if ui:
+            ui.fail("Keys", "cached passphrase stale — recapturing")
+
+    # ── 2. legacy memory scan for x'…' literals (WeChat ≤ 4.1.12)
+    keys_by_rel: dict[str, str] = {}
+    scan_res = None
+    if lifecycle.wechat_running():
+        if ui:
+            ui.begin("Keys", "scanning /proc/<pid>/mem for SQLCipher keys")
+        bin_str = str(d.binary_path) if d.binary_path else None
+        pids = []
+        mp = lifecycle.main_wechat_pid(binary=bin_str)
+        if mp:
+            pids.append(mp)
+        pids += [p for p in lifecycle.wechat_running() if p != mp]
+        scan_res = scan(pids, d.db_storage())
+        log.info(f"keys: {len(scan_res.keys_by_rel)} / {n_salts} via memory scan in {scan_res.elapsed:.2f}s")
+        if scan_res.mem_errors:
+            log.warning(
+                f"memory scan: {scan_res.mem_errors} region(s) unreadable "
+                f"({scan_res.last_mem_error}) — if this persists, kernel ptrace "
+                f"restrictions are likely; run 'sudo wxextract keys' to recover "
+                f"keys with elevated permissions only."
+            )
+        # 0/N is almost always "WeChat is at the Open WeChat dialog" → offer to wait + retry
+        if len(scan_res.keys_by_rel) == 0 and n_salts > 0 and sys.stdin.isatty():
+            log.warning("0 keys recovered — WeChat is likely at the 'Open WeChat' login-confirm dialog.")
+            log.warning("If you click that green 'Open WeChat' button now, the keys will load into memory.")
+            for attempt in range(1, 4):
+                try:
+                    input(f"Press Enter to retry (attempt {attempt}/3), or Ctrl+C to abort: ")
+                except (EOFError, KeyboardInterrupt):
+                    raise _KeysError("aborted during memory-scan retry") from None
+                time.sleep(1.5)
+                pids = []
+                mp = lifecycle.main_wechat_pid(binary=bin_str)
+                if mp:
+                    pids.append(mp)
+                pids += [p for p in lifecycle.wechat_running() if p != mp]
+                scan_res = scan(pids, d.db_storage())
+                log.info(f"retry {attempt}: keys {len(scan_res.keys_by_rel)} / {n_salts}")
+                if len(scan_res.keys_by_rel) == n_salts:
+                    break
+        if scan_res.keys_by_rel and len(scan_res.keys_by_rel) == n_salts:
+            save_keys(scan_res, db_files, d.db_storage(), keys_path)
+            chown_to_invoking_user(keys_path)
+            if ui:
+                ui.end("Keys", f"{len(scan_res.keys_by_rel)} keys recovered via memory scan in {scan_res.elapsed:.2f}s")
+            return load_keys(keys_path)
+
+    # ── 3. live passphrase capture (WeChat ≥ 4.1): launch WeChat under a
+    #      ptrace tracer, grab the WCDB passphrase at login (the green
+    #      'Enter/Log in' button press triggers it). One-time — the
+    #      passphrase is cached and reused by step 1.
+    if not keys_by_rel:
+        if not d.binary_path or not Path(d.binary_path).is_file():
+            raise _KeysError(f"no WeChat binary at {d.binary_path!r} — cannot capture keys")
+        try:
+            hook_off = passphrase_mod.find_hook_offset(Path(d.binary_path))
+        except passphrase_mod.HookNotFoundError as e:
+            log.error(f"cannot locate the WCDB cipher hook in {d.binary_path}: {e}")
+            raise _KeysError(
+                "this WeChat build is newer than wxextract supports — please open "
+                "an issue: https://github.com/boujuan/extract-wechat-messages-linux/issues"
+            ) from e
+        if ui:
+            ui.begin("Keys", "one-time passphrase capture (WeChat restarts)")
+        if lifecycle.wechat_running():
+            log.info("closing WeChat for the one-time passphrase capture")
+            if not lifecycle.close_wechat(binary=str(d.binary_path)):
+                log.warning("WeChat did not close cleanly; attempting capture anyway")
+        log.info(">> ACTION NEEDED: when the WeChat login window appears, press the "
+                 "green 'Enter/Log in' button — the key capture fires at that moment.")
+        try:
+            ph_new = passphrase_mod.capture_passphrase(
+                Path(d.binary_path), timeout=150.0,
+                probe_page1=db_files[0].page1 if db_files else None,
+                launch_cmd=d.launch_cmd or None,
+            )
+        except passphrase_mod.CaptureError as e:
+            msg = f"passphrase capture failed: {e}"
+            if scan_res is not None and scan_res.keys_by_rel:
+                msg += "\nmemory scan also found no usable keys on this WeChat build"
+            else:
+                msg += "\nif a QR-code login was showing, run again and scan it while capture waits"
+            raise _KeysError(msg) from e
+        passphrase_mod.save_passphrase(pass_path, passphrase_mod.PassphraseInfo(
+            passphrase=ph_new, binary=str(d.binary_path), hook_off=hook_off,
+            captured_at=datetime.now().isoformat(timespec="seconds"),
+        ))
+        chown_to_invoking_user(pass_path)
+        derived = passphrase_mod.derive_keys(ph_new, db_files)
+        if len(derived) < n_salts:
+            missing = n_salts - len(derived)
+            log.warning(f"passphrase keyed {len(derived)}/{n_salts} DBs ({missing} remain unkeyed)")
+        if not derived:
+            raise _KeysError("passphrase was captured but derives no valid keys — please report this")
+        save_keys(ScanResult(keys_by_rel=derived, salt_to_rels=salt_to_rels),
+                  db_files, d.db_storage(), keys_path)
+        chown_to_invoking_user(keys_path)
+        if ui:
+            ui.end("Keys", f"passphrase captured (cached); {len(derived)}/{n_salts} keys derived")
+        return derived
+
+    return keys_by_rel
+
+
 def _cmd_resnap(workspace: Path, force: bool = False, no_relaunch: bool = False,
                 account_dir: Path | None = None, ui=None) -> int:
     import logging
 
     from wxextract import discover, lifecycle, snapshot
     from wxextract.decrypt import decrypt_all
-    from wxextract.keys import collect_dbs, load_keys, save_keys, scan
+    from wxextract.keys import load_keys
     log = logging.getLogger("wxextract")
     if ui:
         ui.begin("Discover")
@@ -1063,137 +1248,12 @@ def _cmd_resnap(workspace: Path, force: bool = False, no_relaunch: bool = False,
                 delta = sum(live_stats.values()) - sum(saved.values())
                 ui.end("Keys", f"drift detected ({delta:+,} msgs since last snap) — resnapping")
 
-    # ── KEY CACHE CHECK ────────────────────────────────────────────────────────
-    if ui and ui.stages["Keys"].status not in ("done", "skipped"):
-        ui.begin("Keys", "validating cached keys vs live DBs")
-    cached = None if force else _cached_keys_still_valid(keys_path, d.db_storage())
-    keys_by_rel: dict[str, str] = {}
-    if cached is not None:
-        log.info(f"keys: reusing {len(cached)} cached keys from {keys_path.name} (validated against live DBs)")
-        if ui:
-            ui.end("Keys", f"{len(cached)} cached keys validated against live")
-        keys_by_rel = cached
-    else:
-        from datetime import datetime
-
-        from wxextract import passphrase as passphrase_mod
-        from wxextract.keys import ScanResult
-
-        db_files, salt_to_rels = collect_dbs(d.db_storage())
-        n_salts = len(salt_to_rels)
-        pass_path = workspace / "passphrase.json"
-
-        # ── 1. cached passphrase: derive per-DB keys + HMAC-validate (~0.4 s).
-        #      WeChat ≥ 4.1 path — survives re-keyed/new DBs without WeChat.
-        ph = None if force else passphrase_mod.load_passphrase(pass_path)
-        if ph is not None:
-            if ui:
-                ui.begin("Keys", "deriving keys from cached passphrase")
-            t0 = time.time()
-            derived = passphrase_mod.derive_keys(ph, db_files)
-            if len(derived) == len(db_files):
-                log.info(f"keys: derived {len(derived)}/{len(db_files)} from cached passphrase in {time.time() - t0:.2f}s")
-                save_keys(ScanResult(keys_by_rel=derived, salt_to_rels=salt_to_rels),
-                          db_files, d.db_storage(), keys_path)
-                keys_by_rel = derived
-                if ui:
-                    ui.end("Keys", f"{len(derived)} keys derived from cached passphrase ({time.time() - t0:.1f}s)")
-            else:
-                log.warning(f"cached passphrase only validates {len(derived)}/{len(db_files)} DBs — stale; recapturing")
-                if ui:
-                    ui.fail("Keys", "cached passphrase stale — recapturing")
-
-        if not keys_by_rel:
-            # ── 2. legacy memory scan for x'…' literals (WeChat ≤ 4.1.12)
-            scan_res = None
-            if lifecycle.wechat_running():
-                if ui:
-                    ui.begin("Keys", "scanning /proc/<pid>/mem for SQLCipher keys")
-                bin_str = str(d.binary_path) if d.binary_path else None
-                pids = []
-                mp = lifecycle.main_wechat_pid(binary=bin_str)
-                if mp:
-                    pids.append(mp)
-                pids += [p for p in lifecycle.wechat_running() if p != mp]
-                scan_res = scan(pids, d.db_storage())
-                log.info(f"keys: {len(scan_res.keys_by_rel)} / {n_salts} via memory scan in {scan_res.elapsed:.2f}s")
-                # 0/N is almost always "WeChat is at the Open WeChat dialog" → offer to wait + retry
-                if len(scan_res.keys_by_rel) == 0 and n_salts > 0 and sys.stdin.isatty():
-                    log.warning("0 keys recovered — WeChat is likely at the 'Open WeChat' login-confirm dialog.")
-                    log.warning("If you click that green 'Open WeChat' button now, the keys will load into memory.")
-                    for attempt in range(1, 4):
-                        try:
-                            input(f"Press Enter to retry (attempt {attempt}/3), or Ctrl+C to abort: ")
-                        except (EOFError, KeyboardInterrupt):
-                            print()
-                            return 3
-                        time.sleep(1.5)
-                        pids = []
-                        mp = lifecycle.main_wechat_pid(binary=bin_str)
-                        if mp:
-                            pids.append(mp)
-                        pids += [p for p in lifecycle.wechat_running() if p != mp]
-                        scan_res = scan(pids, d.db_storage())
-                        log.info(f"retry {attempt}: keys {len(scan_res.keys_by_rel)} / {n_salts}")
-                        if len(scan_res.keys_by_rel) == n_salts:
-                            break
-                if scan_res.keys_by_rel and len(scan_res.keys_by_rel) == n_salts:
-                    save_keys(scan_res, db_files, d.db_storage(), keys_path)
-                    keys_by_rel = load_keys(keys_path)
-                    if ui:
-                        ui.end("Keys", f"{len(scan_res.keys_by_rel)} keys recovered via memory scan in {scan_res.elapsed:.2f}s")
-
-        if not keys_by_rel:
-            # ── 3. live passphrase capture (WeChat ≥ 4.1.13): launch WeChat
-            #      under a ptrace tracer, grab the WCDB passphrase at login.
-            #      One-time — the passphrase is cached and reused by path 1.
-            if not d.binary_path or not Path(d.binary_path).is_file():
-                log.error(f"no WeChat binary at {d.binary_path!r} — cannot capture keys")
-                return 3
-            try:
-                hook_off = passphrase_mod.find_hook_offset(Path(d.binary_path))
-            except passphrase_mod.HookNotFoundError as e:
-                log.error(f"cannot locate the WCDB cipher hook in {d.binary_path}: {e}")
-                log.error("this WeChat build is newer than wxextract supports — "
-                          "please open an issue: https://github.com/boujuan/extract-wechat-messages-linux/issues")
-                return 3
-            if ui:
-                ui.begin("Keys", "one-time passphrase capture (WeChat restarts)")
-            if lifecycle.wechat_running():
-                log.info("closing WeChat for the one-time passphrase capture")
-                if not lifecycle.close_wechat(binary=str(d.binary_path)):
-                    log.warning("WeChat did not close cleanly; attempting capture anyway")
-            log.info(">> ACTION NEEDED: when the WeChat login window appears, press the "
-                     "green 'Enter/Log in' button — the key capture fires at that moment.")
-            try:
-                ph_new = passphrase_mod.capture_passphrase(
-                    Path(d.binary_path), timeout=150.0,
-                    probe_page1=db_files[0].page1 if db_files else None,
-                    launch_cmd=d.launch_cmd or None,
-                )
-            except passphrase_mod.CaptureError as e:
-                log.error(f"passphrase capture failed: {e}")
-                if scan_res is not None and scan_res.keys_by_rel:
-                    log.error("memory scan also found no usable keys on this WeChat build")
-                else:
-                    log.error("if a QR-code login was showing, run again and scan it while capture waits")
-                return 3
-            passphrase_mod.save_passphrase(pass_path, passphrase_mod.PassphraseInfo(
-                passphrase=ph_new, binary=str(d.binary_path), hook_off=hook_off,
-                captured_at=datetime.now().isoformat(timespec="seconds"),
-            ))
-            derived = passphrase_mod.derive_keys(ph_new, db_files)
-            if len(derived) < n_salts:
-                missing = n_salts - len(derived)
-                log.warning(f"passphrase keyed {len(derived)}/{n_salts} DBs ({missing} remain unkeyed)")
-            if not derived:
-                log.error("passphrase was captured but derives no valid keys — please report this")
-                return 3
-            save_keys(ScanResult(keys_by_rel=derived, salt_to_rels=salt_to_rels),
-                      db_files, d.db_storage(), keys_path)
-            keys_by_rel = derived
-            if ui:
-                ui.end("Keys", f"passphrase captured (cached); {len(derived)}/{n_salts} keys derived")
+    # ── KEY RECOVERY ───────────────────────────────────────────────────────────
+    try:
+        keys_by_rel = _recover_keys(d, workspace, ui=ui, force=force)
+    except _KeysError as e:
+        log.error(str(e))
+        return 3
 
     # ── CLOSE → SNAPSHOT → DECRYPT ────────────────────────────────────────────
     if ui:
@@ -1246,8 +1306,40 @@ def _cmd_resnap(workspace: Path, force: bool = False, no_relaunch: bool = False,
             log.info(f"saved snapshot stats: {sum(snap_stats.values())} msgs across {len(snap_stats)} shards")
     except Exception as e:
         log.warning(f"could not save snapshot stats: {e}")
+    # Under sudo, hand the freshly-written workspace artifacts back to the
+    # invoking user so unprivileged runs can keep using them.
+    from wxextract.util import chown_to_invoking_user, invoking_sudo_user
+    if invoking_sudo_user() is not None:
+        for artifact in ("snapshot", "plain_dbs", "all_keys.json", "passphrase.json"):
+            chown_to_invoking_user(workspace / artifact)
     log.info("resnap complete")
     return 0 if n_failed == 0 else 4
+
+
+def _cmd_keys(args, workspace: Path, log) -> int:
+    """Recover keys only (no snapshot/decrypt/render) — the sudo-friendly step.
+
+    Usage: sudo wxextract keys   (then run wxextract normally as your user)
+    """
+    from wxextract import discover
+    from wxextract.util import invoking_sudo_user
+    try:
+        d = discover.discover(prefer_account=_account_dir_arg(args))
+    except RuntimeError as e:
+        log.error(str(e))
+        return 3
+    log.info(f"install kind: {d.install_kind}; binary: {d.binary_path}; launch: {' '.join(d.launch_cmd) or '<none>'}")
+    if invoking_sudo_user() is not None:
+        log.info(f"running as root via sudo — outputs will be handed back to user "
+                 f"'{invoking_sudo_user()}'")
+    try:
+        keys_by_rel = _recover_keys(d, workspace, ui=None, force=getattr(args, "force", False))
+    except _KeysError as e:
+        log.error(str(e))
+        return 3
+    print(f"[✓] {len(keys_by_rel)} keys recovered → {workspace / 'all_keys.json'}")
+    print("    now re-run wxextract normally (without sudo) to snapshot, decrypt and render.")
+    return 0
 
 
 # ---------------------------------------------------------------------------

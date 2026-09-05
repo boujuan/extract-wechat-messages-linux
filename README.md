@@ -91,6 +91,7 @@ The first run will:
 wxextract status                              # what's installed, what's cached
 wxextract list                                # contacts table (after first run)
 wxextract resnap                              # close WeChat → fresh snapshot + decrypt → re-open
+wxextract keys                                # recover keys only (no snapshot/decrypt; sudo-friendly)
 wxextract render --alias X                    # render without re-snapshotting
 wxextract preview --alias X --tail 20         # print last N messages, no files written
 wxextract stats   --alias X                   # per-contact analytics panel (terminal)
@@ -504,8 +505,10 @@ else stays in the workspace.
   the green "Enter/Log in" button in the WeChat window while the tracer
   waits (up to 150 s) — the keys are only set up at that moment. Every
   later run uses the cached passphrase with no interaction. If
-  `ptrace` of your own processes is blocked (tightened
-  `kernel.yama.ptrace_scope`), fall back to `sudo`.
+  `ptrace` of the WeChat process is denied (e.g. a restrictive
+  `kernel.yama.ptrace_scope`), either allow it
+  (`sudo sysctl kernel.yama.ptrace_scope=0`) or elevate only the key
+  step and re-run normally: `sudo wxextract keys`.
 - Token counts use `tiktoken cl100k_base` — a good ±5 % proxy for Claude
   models, not exact.
 - WhatsApp ingest is from the standard `.txt` chat export only — no reply

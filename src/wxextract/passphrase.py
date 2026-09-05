@@ -294,6 +294,27 @@ def pbkdf2_key(passphrase: bytes, salt: bytes, iterations: int = KDF_ITER) -> by
     return hashlib.pbkdf2_hmac("sha512", passphrase, salt, iterations, dklen=KEY_SZ)
 
 
+def _ptrace_guidance() -> str:
+    """Actionable guidance for a ptrace-denied attach failure, including the
+    current kernel.yama.ptrace_scope value and the elevate-keys-only path."""
+    scope = None
+    try:
+        scope = Path("/proc/sys/kernel/yama/ptrace_scope").read_text().strip()
+    except OSError:
+        pass
+    lines = ["ptrace was denied by the kernel — wxextract cannot attach to the WeChat process."]
+    if scope is not None:
+        lines.append(f"current kernel.yama.ptrace_scope = {scope}")
+    lines += [
+        "Fix (pick one):",
+        "  1) allow ptrace until reboot:  sudo sysctl kernel.yama.ptrace_scope=0",
+        "  2) make it permanent:          echo 'kernel.yama.ptrace_scope = 0' | "
+        "sudo tee /etc/sysctl.d/90-wxextract-ptrace.conf",
+        "  3) elevate only the key step, then re-run normally:  sudo wxextract keys",
+    ]
+    return "\n".join(lines)
+
+
 def _pids_of_exe(binary: str) -> set[int]:
     out: set[int] = set()
     for entry in os.scandir("/proc"):
@@ -344,7 +365,13 @@ def _tracer(binary: str, hook_off: int, timeout: float,
         raise CaptureError("WeChat did not start (no new wechat process appeared)")
 
     # attach: main thread first (single-threaded right after exec)
-    _ptrace(PTRACE_ATTACH, target)
+    try:
+        _ptrace(PTRACE_ATTACH, target)
+    except OSError as e:
+        raise CaptureError(
+            f"PTRACE_ATTACH on the WeChat process (pid {target}) failed: {e}\n"
+            f"{_ptrace_guidance()}"
+        ) from e
     os.waitpid(target, 0)  # attach SIGSTOP
     tracked: set[int] = {target}
     # any sibling threads that snuck in before the attach

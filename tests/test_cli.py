@@ -84,3 +84,46 @@ def test_workspace_only_defaults_to_run():
     args = _parse(["--workspace", "/tmp/x"])
     assert args.command == "run"
     assert args.workspace == "/tmp/x"
+
+
+# ── `wxextract keys` subcommand (issue #1: elevate only the key step) ──────
+
+def test_parser_has_keys_subcommand():
+    from wxextract.cli import build_parser
+
+    args = build_parser().parse_args(["keys", "--force"])
+    assert args.command == "keys"
+    assert args.force is True
+
+
+def test_cmd_keys_discover_failure_returns_3(monkeypatch, tmp_path):
+    import logging
+    from types import SimpleNamespace
+
+    import wxextract.discover as disc
+    from wxextract import cli
+
+    def boom(*a, **k):
+        raise RuntimeError("no WeChat data root found")
+
+    monkeypatch.setattr(disc, "discover", boom)
+    rc = cli._cmd_keys(SimpleNamespace(force=False, account_dir=None),
+                       tmp_path, logging.getLogger("t"))
+    assert rc == 3
+
+
+def test_cmd_keys_success_prints_next_step(monkeypatch, tmp_path, capsys):
+    import logging
+    from types import SimpleNamespace
+
+    from wxextract import cli
+
+    monkeypatch.setattr(cli, "_recover_keys", lambda d, ws, ui=None, force=False: {"a.db": "00" * 32})
+    monkeypatch.setattr("wxextract.discover.discover", lambda *a, **k: SimpleNamespace(
+        install_kind="aur", binary_path="/opt/wechat/wechat", launch_cmd=["/usr/bin/wechat"]))
+    rc = cli._cmd_keys(SimpleNamespace(force=False, account_dir=None),
+                       tmp_path, logging.getLogger("t"))
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "1 keys recovered" in out
+    assert "without sudo" in out
