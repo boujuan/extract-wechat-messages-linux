@@ -101,11 +101,13 @@ def _all_dead(pids: list[int]) -> bool:
 
 def stop_portable_services(timeout: float = 8.0) -> bool:
     """Stop the transient systemd user units of the AUR ``wechat`` package's
-    ``portable`` launcher (``app-portable-com.qq.weixin-*.service`` and its
-    D-Bus proxy units). On that packaging the sandbox is supervised by
-    systemd, which can re-spawn WeChat after an abnormal death — stopping
-    the units is the only reliable close. Returns True if any unit was
-    stopped (or systemctl isn't present)."""
+    ``portable`` launcher and its D-Bus proxy units. On that packaging the
+    sandbox is supervised by systemd, which can re-spawn WeChat after an
+    abnormal death — stopping the units is the only reliable close.
+
+    The portable app id is wechat-package-dependent and has changed across
+    releases (``com.qq.weixin`` → ``com.tencent.wechat``), so glob both.
+    Returns True if any unit was stopped (or systemctl isn't present)."""
     import shutil
     import subprocess
     if shutil.which("systemctl") is None:
@@ -113,7 +115,9 @@ def stop_portable_services(timeout: float = 8.0) -> bool:
     try:
         proc = subprocess.run(
             ["systemctl", "--user", "list-units", "--plain", "--no-legend",
-             "app-portable-com.qq.weixin-*.service", "WeChat-*-dbus.service"],
+             "app-portable-com.qq.weixin*.service",
+             "app-portable-com.tencent.wechat*.service",
+             "*wechat*dbus*.service", "*weixin*dbus*.service"],
             capture_output=True, text=True, timeout=timeout,
         )
     except (OSError, subprocess.TimeoutExpired):
