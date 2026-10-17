@@ -28,7 +28,8 @@ packages = ["src/wxextract"]
 dev = [
     "pytest>=8.0",
     "pytest-cov>=5.0",
-    "lxml>=5.2",   # tests only — XML well-formedness assertions
+    "lxml>=5.2", # tests only — XML well-formedness assertions
+    "pydantic>=2.14.1",
 ]
 
 [tool.uv]

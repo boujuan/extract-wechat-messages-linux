@@ -463,6 +463,23 @@ compression ratio ≥ 30 %, chunker integrity, emoji-squash and redact regexes,
 WhatsApp JSON loader + combined-contact merge, Instagram loader + export/API
 normalization (mojibake repair, ms/µs timestamps, type mapping, me-derivation).
 
+### Reverse-engineering helper (`tools/elf_xref.py`)
+
+A dev-only ELF64 xref scanner (not shipped in the wheel; needs the `dev`
+dependency group). It answers *"does this stripped binary actually reference
+this string / call this function?"* — useful when triaging suspected
+anti-debugging checks:
+
+```sh
+uv run python tools/elf_xref.py /opt/wechat/wechat 'TracerPid:' '/proc/self/status'
+uv run python tools/elf_xref.py --target 0x45b3bd0 /opt/wechat/wechat   # call/lea/ptr refs to a function
+```
+
+It resolves anchors via `sh_addr` (not file offsets), reports `lea` xrefs,
+direct `call`/`jmp` refs and pointer-table entries, and flags strings that
+nothing references. Tests build synthetic ELFs (`tests/test_elf_xref.py`); set
+`WXE_TEST_ELF=/opt/wechat/wechat` to also run a smoke test against a real binary.
+
 ## Output locations
 
 The workspace directory holds everything wxextract produces:

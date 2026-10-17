@@ -48,7 +48,7 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
-      - run: uv run --with ruff ruff check src tests
+      - run: uv run --with ruff ruff check src tests tools
 
   build:
     name: build wheel + sdist
