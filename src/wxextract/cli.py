@@ -81,9 +81,14 @@ _EPILOG = (
 def _add_common_render_args(sp, *, include_pipeline: bool = False):
     """Shared argument groups for the `run` and `render` subcommands."""
     g_sel = sp.add_argument_group("Conversation selection")
-    g_sel.add_argument("--alias", metavar="WECHAT_ID[,WECHAT_ID,...]",
-                       help="WeChat ID of the contact(s) to extract (comma-separated for several). "
-                            "Skips the interactive picker.")
+    who = g_sel.add_mutually_exclusive_group()
+    who.add_argument("--alias", metavar="WECHAT_ID[,WECHAT_ID,...]",
+                     help="WeChat ID of the contact(s) to extract (comma-separated for several). "
+                          "Skips the interactive picker.")
+    who.add_argument("--filter", action="append", metavar="TEXT",
+                     help="Extract every contact whose name, remark, nickname or WeChat ID "
+                          "contains TEXT (case-insensitive; same match as the picker's filter). "
+                          "Repeat for several. Skips the interactive picker.")
     g_sel.add_argument("--all-contacts", action="store_true",
                        help="Extract every contact with messages. Implies sequential processing; "
                             "one set of files per contact in --out-dir.")
@@ -516,7 +521,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 _RUN_FLAGS = {
-    "--alias", "--format", "--chunk", "--gap", "--no-turn-merge", "--my-label",
+    "--alias", "--filter", "--format", "--chunk", "--gap", "--no-turn-merge", "--my-label",
     "--skip-recalls", "--include-recalls", "--squash-emoji", "--redact",
     "--sticker-emojis", "--time-precision", "--reply-preview",
     "--out-dir", "--force", "--no-relaunch",
@@ -1368,7 +1373,7 @@ def _cmd_render(args, workspace: Path, log, ui=None) -> int:
     from wxextract import instagram as _ig
     from wxextract import whatsapp as _wa
     from wxextract.contacts import find_by_alias, load_contacts
-    from wxextract.picker import pick
+    from wxextract.picker import _apply_filter, pick
     t_start = time.perf_counter()
     whatsapp_paths = list(getattr(args, "whatsapp_json", []) or [])
     whatsapp_only = bool(getattr(args, "whatsapp_only", False))
@@ -1448,6 +1453,22 @@ def _cmd_render(args, workspace: Path, log, ui=None) -> int:
         if ui:
             summary = ", ".join(f"{c.display_name} ({c.message_count:,})" for c in contacts)
             ui.end("Contacts", summary[:80])
+    elif getattr(args, "filter", None):
+        for q in args.filter:
+            hits = _apply_filter(recs, q)
+            if not hits:
+                if ui:
+                    ui.fail("Contacts", f"--filter {q!r}: no match")
+                    ui.stop()
+                print(f"[!] --filter {q!r} matched no contact{_suggest_alias(recs, q)}")
+                return 2
+            contacts.extend(hits)
+        contacts = list({c.username: c for c in contacts}.values())
+        log.info("--filter matched: " + ", ".join(f"{c.display_name} ({c.alias or c.username})"
+                                                  for c in contacts))
+        if ui:
+            ui.end("Contacts", ", ".join(f"{c.display_name} ({c.message_count:,})"
+                                         for c in contacts)[:80])
     elif external_pairs:
         # --whatsapp-json / --instagram-json given without --alias — skip the
         # picker and just render the external pairs.
