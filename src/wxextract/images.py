@@ -25,8 +25,11 @@ and the WeChat-proprietary `wxgf` (HEVC stream) container.
 """
 from __future__ import annotations
 
+import logging
 import struct
 from pathlib import Path
+
+log = logging.getLogger("wxextract.images")
 
 V2_MAGIC = b"\x07\x08V2\x08\x07"
 V1_MAGIC = b"\x07\x08V1\x08\x07"
@@ -229,9 +232,15 @@ def pick_test_ciphertexts(account_dir: Path, n: int = 5) -> list[tuple[bytes, Pa
         try:
             with open(p, "rb") as f:
                 head = f.read(31)
+            size = p.stat().st_size
         except OSError:
             continue
-        if len(head) == 31 and head[:4] == V2_MAGIC[:4]:
+        if len(head) < 31 or head[:4] != V2_MAGIC[:4]:
+            continue
+        # skip truncated files (expired / partial downloads): the AES
+        # section declared in the header must fit in the file
+        aes = struct.unpack_from("<L", head, 6)[0]
+        if 15 + aes - (~(~aes % 16)) <= size:
             out.append((head[15:31], p))
     return out
 
@@ -254,7 +263,19 @@ def _try_key(key: bytes, ciphertext: bytes) -> str | None:
     for magic in _IMAGE_FORMAT_MAGICS:
         if plain.startswith(magic):
             return magic.decode("latin-1", errors="replace")
+    if plain[4:8] == b"ftyp":                 # ISO-BMFF: HEIC / AVIF
+        return "ftyp"
     return None
+
+
+def score(key: bytes, blob: bytes) -> int:
+    """How many 16-byte test blocks in `blob` decrypt (AES-128-ECB, one
+    call) to a known image header — the cross-validation count."""
+    from Crypto.Cipher import AES
+    plain = AES.new(key[:16], AES.MODE_ECB).decrypt(blob)
+    return sum(1 for i in range(0, len(plain), 16)
+               if plain[i:i + 16].startswith(_IMAGE_FORMAT_MAGICS)
+               or plain[i + 4:i + 8] == b"ftyp")
 
 
 def find_v2_aes_key(pids: list[int],
@@ -265,8 +286,9 @@ def find_v2_aes_key(pids: list[int],
     `test_vectors` is a list of (ciphertext, file_path) pairs (recommended
     ≥3 for cross-validation). A legacy single `bytes` input is also
     accepted for back-compat — but use the list form to avoid false
-    positives. A candidate is accepted only when it produces a known image
-    magic for EVERY supplied test vector.
+    positives. A candidate is accepted when it produces a known image
+    header for at least min(3, len(vectors)) of the test vectors, so one
+    unusual or damaged sample cannot hide the right key.
 
     Returns the key as bytes (16 long) or None.
     """
@@ -280,10 +302,14 @@ def find_v2_aes_key(pids: list[int],
 
     from wxextract.keys import list_regions
 
-    def _validates_all(candidate: bytes) -> bool:
-        return all(_try_key(candidate, c) for c in ciphers)
+    blob = b"".join(ciphers)
+    need = min(3, len(ciphers))
+
+    def enough(cand: bytes) -> bool:
+        return score(cand, blob) >= need
 
     tried: set[bytes] = set()  # avoid re-validating the same string from multiple regions
+    denied = 0                 # regions /proc/<pid>/mem refused to read
 
     # Pass 1 — exact boundary 16/32 alphanum tokens
     for pid in pids:
@@ -300,21 +326,26 @@ def find_v2_aes_key(pids: list[int],
                     mem.seek(region.start)
                     data = mem.read(region.size)
             except (OSError, ValueError):
+                denied += 1
                 continue
             for m in _RE_KEY16.finditer(data):
                 cand = m.group()
                 if cand in tried:
                     continue
                 tried.add(cand)
-                if _try_key(cand, ciphers[0]) and _validates_all(cand):
+                if enough(cand):
                     return cand
             for m in _RE_KEY32.finditer(data):
                 cand = m.group()[:16]
                 if cand in tried:
                     continue
                 tried.add(cand)
-                if _try_key(cand, ciphers[0]) and _validates_all(cand):
+                if enough(cand):
                     return cand
+
+    if denied:
+        log.warning(f"image-key scan: {denied} memory region(s) unreadable — "
+                    "kernel.yama.ptrace_scope likely blocks /proc/<pid>/mem")
 
     # Pass 2 — sliding window within long alphanum runs (key embedded in larger string)
     for pid in pids:
@@ -336,7 +367,7 @@ def find_v2_aes_key(pids: list[int],
                     if cand in tried:
                         continue
                     tried.add(cand)
-                    if _try_key(cand, ciphers[0]) and _validates_all(cand):
+                    if enough(cand):
                         return cand
     return None
 
