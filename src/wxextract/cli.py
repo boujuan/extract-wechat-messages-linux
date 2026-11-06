@@ -79,6 +79,14 @@ _EPILOG = (
 )
 
 
+# --filter, shared by run / render / images / stats / preview
+FMETA = "TEXT|FIELD(REGEX)"
+FHELP = ("Select every matching contact. TEXT: name, remark, nickname or WeChat ID "
+         "contains TEXT (case-insensitive; same match as the picker's filter). "
+         "FIELD(REGEX): case-insensitive regex search on one field — Name, Alias, "
+         "Remark, Nick or Wxid — e.g. 'Name(^Mom$)'. Repeat for several.")
+
+
 def _add_common_render_args(sp, *, include_pipeline: bool = False):
     """Shared argument groups for the `run` and `render` subcommands."""
     g_sel = sp.add_argument_group("Conversation selection")
@@ -86,12 +94,8 @@ def _add_common_render_args(sp, *, include_pipeline: bool = False):
     who.add_argument("--alias", metavar="WECHAT_ID[,WECHAT_ID,...]",
                      help="WeChat ID of the contact(s) to extract (comma-separated for several). "
                           "Skips the interactive picker.")
-    who.add_argument("--filter", action="append", metavar="TEXT|FIELD(REGEX)",
-                     help="Extract every matching contact. TEXT: name, remark, nickname or "
-                          "WeChat ID contains TEXT (case-insensitive; same match as the "
-                          "picker's filter). FIELD(REGEX): case-insensitive regex search on "
-                          "one field — Name, Alias, Remark, Nick or Wxid — e.g. "
-                          "'Name(^Mom$)'. Repeat for several. Skips the interactive picker.")
+    who.add_argument("--filter", action="append", metavar=FMETA,
+                     help=FHELP + " Skips the interactive picker.")
     g_sel.add_argument("--all-contacts", action="store_true",
                        help="Extract every contact with messages. Implies sequential processing; "
                             "one set of files per contact in --out-dir.")
@@ -286,8 +290,10 @@ def build_parser() -> argparse.ArgumentParser:
                                     "automatically. V2 (WeChat ≥ 2025-08) requires --image-key with "
                                     "the 16-byte AES key from a WeChat memory scan.",
                         formatter_class=Formatter)
-    sp.add_argument("--alias", metavar="WECHAT_ID",
-                    help="WeChat ID of one contact (default: all contacts in the picker list).")
+    who = sp.add_mutually_exclusive_group()
+    who.add_argument("--alias", metavar="WECHAT_ID",
+                     help="WeChat ID of one contact (default: all contacts in the picker list).")
+    who.add_argument("--filter", action="append", metavar=FMETA, help=FHELP)
     sp.add_argument("--image-key", metavar="HEX_OR_ASCII",
                     help="Override the V2 AES key (32 hex chars OR 16 ASCII chars). "
                          "Default: auto-recover from a running WeChat process and cache.")
@@ -307,16 +313,19 @@ def build_parser() -> argparse.ArgumentParser:
                                     "chain box plots, and tables. "
                                     "Uses the existing decrypted plain_dbs/ (run `wxextract run` first).",
                         formatter_class=Formatter)
-    sp.add_argument("--alias", metavar="WECHAT_ID",
-                    help="WeChat ID of the contact. Comma list works too (a,b,c). "
-                         "Omit to include every contact above --min-messages.")
+    who = sp.add_mutually_exclusive_group()
+    who.add_argument("--alias", metavar="WECHAT_ID",
+                     help="WeChat ID of the contact. Comma list works too (a,b,c). "
+                          "Omit (and --filter) to include every contact above --min-messages.")
+    who.add_argument("--filter", action="append", metavar=FMETA,
+                     help=FHELP + " Without --html, prints one terminal panel per match.")
     sp.add_argument("--my-label", default="Me", metavar="STR",
                     help="Label for your own messages. Default: %(default)s.")
     sp.add_argument("--top", type=int, default=12, metavar="N",
                     help="How many top emojis / words to show. Default: %(default)s.")
     sp.add_argument("--html", action="store_true",
                     help="Generate an interactive HTML report instead of terminal output. "
-                         "Implied when --alias is omitted.")
+                         "Implied when both --alias and --filter are omitted.")
     sp.add_argument("--min-messages", type=int, default=200, metavar="N",
                     help="(HTML report) skip contacts with fewer than N messages. Default: %(default)s.")
     sp.add_argument("--out", metavar="PATH",
@@ -353,8 +362,11 @@ def build_parser() -> argparse.ArgumentParser:
                         description="Print the last N messages of a contact straight to stdout; "
                                     "useful for sanity-checking after a resnap.",
                         formatter_class=Formatter)
-    sp.add_argument("--alias", required=True, metavar="WECHAT_ID",
-                    help="WeChat ID of the contact.")
+    who = sp.add_mutually_exclusive_group(required=True)
+    who.add_argument("--alias", metavar="WECHAT_ID",
+                     help="WeChat ID of the contact.")
+    who.add_argument("--filter", action="append", metavar=FMETA,
+                     help=FHELP + " Each match is previewed in turn.")
     sp.add_argument("--tail", type=int, default=20, metavar="N",
                     help="How many recent messages to show. Default: %(default)s.")
     sp.add_argument("--my-label", default="Me", metavar="STR",
@@ -1365,6 +1377,29 @@ def _suggest_alias(recs, alias: str) -> str:
     return ""
 
 
+def hits(recs, query: str) -> list:
+    """Contacts matched by one --filter value. Prints why and returns []
+    on an invalid regex or no match."""
+    from wxextract.picker import chooser
+    try:
+        found = chooser(recs, query)
+    except re.error as err:
+        print(f"[!] --filter {query!r}: invalid regex ({err.msg} at position {err.pos})")
+        return []
+    if not found:
+        print(f"[!] --filter {query!r} matched no contact{_suggest_alias(recs, query)}")
+    return found
+
+
+def matches(recs, queries: list[str]) -> list | None:
+    """Union of hits() over every --filter value, deduplicated in order;
+    None if any value is invalid or matches nothing (each one reported)."""
+    groups = [hits(recs, q) for q in queries]
+    if all(groups):
+        return list({c.username: c for c in sum(groups, [])}.values())
+    return None
+
+
 def _cmd_render(args, workspace: Path, log, ui=None) -> int:
     """Render one contact (or many via --alias=a,b or --all-contacts).
 
@@ -1376,7 +1411,7 @@ def _cmd_render(args, workspace: Path, log, ui=None) -> int:
     from wxextract import instagram as _ig
     from wxextract import whatsapp as _wa
     from wxextract.contacts import find_by_alias, load_contacts
-    from wxextract.picker import chooser, pick
+    from wxextract.picker import pick
     t_start = time.perf_counter()
     whatsapp_paths = list(getattr(args, "whatsapp_json", []) or [])
     whatsapp_only = bool(getattr(args, "whatsapp_only", False))
@@ -1457,22 +1492,12 @@ def _cmd_render(args, workspace: Path, log, ui=None) -> int:
             summary = ", ".join(f"{c.display_name} ({c.message_count:,})" for c in contacts)
             ui.end("Contacts", summary[:80])
     elif getattr(args, "filter", None):
-        for q in args.filter:
-            try:
-                hits = chooser(recs, q)
-            except re.error as e:
-                if ui:
-                    ui.stop()
-                print(f"[!] --filter {q!r}: invalid regex ({e})")
-                return 2
-            if not hits:
-                if ui:
-                    ui.fail("Contacts", f"--filter {q!r}: no match")
-                    ui.stop()
-                print(f"[!] --filter {q!r} matched no contact{_suggest_alias(recs, q)}")
-                return 2
-            contacts.extend(hits)
-        contacts = list({c.username: c for c in contacts}.values())
+        contacts = matches(recs, args.filter)
+        if contacts is None:
+            if ui:
+                ui.fail("Contacts", "--filter: invalid or no match")
+                ui.stop()
+            return 2
         log.info("--filter matched: " + ", ".join(f"{c.display_name} ({c.alias or c.username})"
                                                   for c in contacts))
         if ui:
@@ -1816,6 +1841,10 @@ def _cmd_images(args, workspace: Path, log) -> int:
             print(f"[!] alias {args.alias!r} not found")
             return 2
         targets = [c]
+    elif args.filter:
+        targets = matches(recs, args.filter)
+        if targets is None:
+            return 2
     else:
         targets = recs
     base_out = (Path(args.out_dir).expanduser().resolve()
@@ -2035,10 +2064,10 @@ def _cmd_stats(args, workspace: Path, log) -> int:
     do_merge = bool(getattr(args, "merge", False))
 
     # ── HTML mode detection ─────────────────────────────────────────
-    html_mode = (not args.alias) or args.html or bool(args.out) \
+    html_mode = not (args.alias or args.filter) or args.html or bool(args.out) \
         or bool(whatsapp_paths) or bool(instagram_paths) or external_only
 
-    # ── Single-contact terminal mode (no WhatsApp involvement) ──────
+    # ── Terminal mode: one panel per contact (no WhatsApp involvement) ──
     if not html_mode:
         plain = workspace / "plain_dbs"
         if not plain.is_dir():
@@ -2046,17 +2075,20 @@ def _cmd_stats(args, workspace: Path, log) -> int:
             return 2
         recs = load_contacts(plain)
         my_wxid = _detect_my_wxid(workspace) or "wxid_unknown"
-        contact = find_by_alias(recs, args.alias)
-        if contact is None:
+        panels = matches(recs, args.filter) if args.filter else [find_by_alias(recs, args.alias)]
+        if panels is None:
+            return 2
+        if panels == [None]:
             print(f"[!] alias {args.alias!r} not found")
             hint = _suggest_alias(recs, args.alias)
             if hint:
                 print(hint)
             return 2
-        msgs = list(extract(contact, my_wxid=my_wxid, skip_recalls=True))
-        counts = _stats.compute(msgs, contact, my_label=args.my_label, top_n=args.top)
         width = _sh.get_terminal_size((140, 24)).columns
-        _stats.render(counts, contact, args.my_label, Console(width=max(width, 120)))
+        for contact in panels:
+            msgs = list(extract(contact, my_wxid=my_wxid, skip_recalls=True))
+            counts = _stats.compute(msgs, contact, my_label=args.my_label, top_n=args.top)
+            _stats.render(counts, contact, args.my_label, Console(width=max(width, 120)))
         return 0
 
     # ── HTML mode: build the (ContactRecord, list[Message]) pairs ───
@@ -2075,7 +2107,11 @@ def _cmd_stats(args, workspace: Path, log) -> int:
     # Which WeChat contacts to include
     aliases = ([a.strip() for a in args.alias.split(",") if a.strip()]
                if args.alias else None)
-    if aliases is None:
+    if args.filter:
+        wechat_targets = matches(recs, args.filter)
+        if wechat_targets is None:
+            return 2
+    elif aliases is None:
         wechat_targets = [r for r in recs if (r.message_count or 0) >= args.min_messages]
         wechat_targets.sort(key=lambda r: -(r.message_count or 0))
     else:
@@ -2200,29 +2236,33 @@ def _cmd_preview(args, workspace: Path, log) -> int:
         print(f"[!] no plain_dbs at {plain}. Run `wxextract run` first.")
         return 2
     recs = load_contacts(plain)
-    contact = find_by_alias(recs, args.alias)
-    if contact is None:
+    shown = matches(recs, args.filter) if args.filter else [find_by_alias(recs, args.alias)]
+    if shown is None:
+        return 2
+    if shown == [None]:
         print(f"[!] alias {args.alias!r} not found")
         hint = _suggest_alias(recs, args.alias)
         if hint:
             print(hint)
         return 2
     my_wxid = _detect_my_wxid(workspace) or "wxid_unknown"
-    msgs = list(extract(contact, my_wxid=my_wxid))
-    if not msgs:
-        print(f"(no messages with {contact.display_name})")
-        return 0
-    tail = msgs[-args.tail:]
-    me_label = args.my_label
-    other_label = contact.display_name
-    print(f"# {other_label} ({contact.alias or contact.username}) — last {len(tail)} of {len(msgs)} messages")
-    print()
-    for m in tail:
-        from datetime import datetime as _dt
-        dt = _dt.fromtimestamp(m.create_time).strftime("%Y-%m-%d %H:%M:%S")
-        who = me_label if m.is_me else other_label
-        body = body_of(m).text or ""
-        print(f"[{dt}] {who}: {body}")
+    for contact in shown:
+        msgs = list(extract(contact, my_wxid=my_wxid))
+        if not msgs:
+            print(f"(no messages with {contact.display_name})")
+            continue
+        tail = msgs[-args.tail:]
+        me_label = args.my_label
+        other_label = contact.display_name
+        print(f"# {other_label} ({contact.alias or contact.username}) — last {len(tail)} of {len(msgs)} messages")
+        print()
+        for m in tail:
+            from datetime import datetime as _dt
+            dt = _dt.fromtimestamp(m.create_time).strftime("%Y-%m-%d %H:%M:%S")
+            who = me_label if m.is_me else other_label
+            body = body_of(m).text or ""
+            print(f"[{dt}] {who}: {body}")
+        print()
     return 0
 
 
