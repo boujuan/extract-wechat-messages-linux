@@ -5,6 +5,7 @@ typing a substring filter.
 """
 from __future__ import annotations
 
+import re
 import sqlite3
 from datetime import datetime
 
@@ -97,6 +98,28 @@ def _apply_filter(records: list[ContactRecord], q: str) -> list[ContactRecord]:
         or q_l in r.nick_name.lower()
         or q_l in r.remark.lower()
     ]
+
+
+# --filter field names → ContactRecord attribute
+FIELDS = {
+    "name": "display_name",
+    "alias": "alias",
+    "remark": "remark",
+    "nick": "nick_name",
+    "wxid": "username",
+}
+
+
+def chooser(recs: list[ContactRecord], query: str) -> list[ContactRecord]:
+    """--filter matcher. ``Field(regex)`` with Field one of Name, Alias,
+    Remark, Nick, Wxid (any case) runs a case-insensitive ``re.search``
+    on that field; anything else is the picker's plain substring match.
+    Raises ``re.error`` on an invalid regex."""
+    m = re.fullmatch(r"(\w+)\((.*)\)", query, re.DOTALL)
+    if m is None or m.group(1).lower() not in FIELDS:
+        return _apply_filter(recs, query)
+    rx = re.compile(m.group(2), re.IGNORECASE)
+    return [r for r in recs if rx.search(getattr(r, FIELDS[m.group(1).lower()]))]
 
 
 def pick(records: list[ContactRecord], console: Console | None = None) -> ContactRecord | None:

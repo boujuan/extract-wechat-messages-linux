@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import time
 from pathlib import Path
@@ -85,10 +86,12 @@ def _add_common_render_args(sp, *, include_pipeline: bool = False):
     who.add_argument("--alias", metavar="WECHAT_ID[,WECHAT_ID,...]",
                      help="WeChat ID of the contact(s) to extract (comma-separated for several). "
                           "Skips the interactive picker.")
-    who.add_argument("--filter", action="append", metavar="TEXT",
-                     help="Extract every contact whose name, remark, nickname or WeChat ID "
-                          "contains TEXT (case-insensitive; same match as the picker's filter). "
-                          "Repeat for several. Skips the interactive picker.")
+    who.add_argument("--filter", action="append", metavar="TEXT|FIELD(REGEX)",
+                     help="Extract every matching contact. TEXT: name, remark, nickname or "
+                          "WeChat ID contains TEXT (case-insensitive; same match as the "
+                          "picker's filter). FIELD(REGEX): case-insensitive regex search on "
+                          "one field — Name, Alias, Remark, Nick or Wxid — e.g. "
+                          "'Name(^Mom$)'. Repeat for several. Skips the interactive picker.")
     g_sel.add_argument("--all-contacts", action="store_true",
                        help="Extract every contact with messages. Implies sequential processing; "
                             "one set of files per contact in --out-dir.")
@@ -1373,7 +1376,7 @@ def _cmd_render(args, workspace: Path, log, ui=None) -> int:
     from wxextract import instagram as _ig
     from wxextract import whatsapp as _wa
     from wxextract.contacts import find_by_alias, load_contacts
-    from wxextract.picker import _apply_filter, pick
+    from wxextract.picker import chooser, pick
     t_start = time.perf_counter()
     whatsapp_paths = list(getattr(args, "whatsapp_json", []) or [])
     whatsapp_only = bool(getattr(args, "whatsapp_only", False))
@@ -1455,7 +1458,13 @@ def _cmd_render(args, workspace: Path, log, ui=None) -> int:
             ui.end("Contacts", summary[:80])
     elif getattr(args, "filter", None):
         for q in args.filter:
-            hits = _apply_filter(recs, q)
+            try:
+                hits = chooser(recs, q)
+            except re.error as e:
+                if ui:
+                    ui.stop()
+                print(f"[!] --filter {q!r}: invalid regex ({e})")
+                return 2
             if not hits:
                 if ui:
                     ui.fail("Contacts", f"--filter {q!r}: no match")
