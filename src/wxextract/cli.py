@@ -1801,7 +1801,7 @@ def _cmd_images(args, workspace: Path, log) -> int:
     if aes_key is None:
         # need to recover from memory — pick MULTIPLE test ciphertexts so a
         # candidate must validate against all of them (kills false positives)
-        vectors = images.pick_test_ciphertexts(d.account_dir, n=5)
+        vectors = images.pick_test_ciphertexts(d.account_dir, n=8)
         if not vectors:
             print("[!] no V2 .dat files found — nothing to decrypt.")
             return 0
@@ -1829,7 +1829,11 @@ def _cmd_images(args, workspace: Path, log) -> int:
             print("      2. tap 2-3 thumbnails so the keys get loaded into the process")
             print("      3. immediately re-run  wxextract images …")
             return 3
-        log.info(f"recovered image AES key: {aes_key!r} (cross-validated against {len(vectors)} files)")
+        bad = [p.name for c, p in vectors if not images.score(aes_key, c)]
+        log.info(f"recovered image AES key: {aes_key!r} (validated "
+                 f"{len(vectors) - len(bad)}/{len(vectors)} test files)")
+        if bad:
+            log.warning(f"test files the key does not open (damaged/expired?): {', '.join(bad)}")
         _save_cached_image_key(workspace, aes_key, xor_key)
         log.info(f"saved → workspace/{_IMG_KEY_CACHE}")
 
