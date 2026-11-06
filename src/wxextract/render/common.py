@@ -91,6 +91,11 @@ def _video_body(content: str) -> Body:
         secs = int(m.group(1))
         body.media["duration_s"] = secs
         body.text = f"[video {secs}s]"
+    # file IDs: msg/video/<YYYY-MM>/<hex>.mp4 is named after one of these
+    for key in ("md5", "newmd5", "rawmd5"):
+        hit = re.search(rf'\b{key}\s*=\s*"([0-9a-fA-F]{{32}})"', content or "")
+        if hit:
+            body.media[key] = hit.group(1).lower()
     return body
 
 
